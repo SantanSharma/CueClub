@@ -1,17 +1,20 @@
 import { DatePipe } from '@angular/common';
-import { Component, computed, inject } from '@angular/core';
-import { ActivatedRoute, RouterLink } from '@angular/router';
+import { Component, computed, inject, signal } from '@angular/core';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { DataStoreService } from '../../core/services/data-store.service';
 import { OrderFlowService } from '../../core/services/order-flow.service';
+import { SecurityService } from '../../core/services/security.service';
 import { BadgeComponent } from '../../shared/ui/badge/badge';
 import { EmptyStateComponent } from '../../shared/ui/empty-state/empty-state';
 import { IconComponent } from '../../shared/ui/icon/icon';
+import { ModalComponent } from '../../shared/ui/modal/modal';
+import { ToastService } from '../../shared/ui/toast/toast.service';
 import { TooltipDirective } from '../../shared/ui/tooltip/tooltip.directive';
 import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/util/format';
 
 @Component({
   selector: 'app-customer-profile-page',
-  imports: [RouterLink, DatePipe, IconComponent, BadgeComponent, EmptyStateComponent, TooltipDirective],
+  imports: [RouterLink, DatePipe, IconComponent, BadgeComponent, EmptyStateComponent, ModalComponent, TooltipDirective],
   template: `
     @if (customer(); as c) {
       <div class="flex flex-col gap-5">
@@ -37,6 +40,15 @@ import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/uti
             </button>
             <button type="button" class="btn btn-primary" (click)="flow.startBooking(c.id)">
               <app-icon name="plus" [size]="16" /> New booking
+            </button>
+            <button
+              type="button"
+              class="btn btn-ghost btn-icon text-faint hover:text-danger"
+              (click)="confirmRemove.set(true)"
+              aria-label="Remove customer"
+              [appTooltip]="'Hides the customer from lists. Their bookings and bills stay in your records.'"
+            >
+              <app-icon name="trash" [size]="16" />
             </button>
           </div>
         </header>
@@ -123,6 +135,24 @@ import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/uti
           }
         </section>
       </div>
+
+      @if (confirmRemove()) {
+        <app-modal title="Remove this customer?" (close)="confirmRemove.set(false)">
+          <p class="text-[13px] leading-relaxed text-ink-soft">
+            <strong>{{ c.name }}</strong> stops showing up in lists and searches. Their bookings, bills and payments stay in
+            your records and reports.
+          </p>
+          @if (outstanding() > 0) {
+            <p class="flex items-center gap-2 rounded-xl bg-warn-soft px-3 py-2.5 text-[13px] font-medium text-warn">
+              <app-icon name="alert" [size]="15" /> They still owe {{ formatCurrency(outstanding()) }}.
+            </p>
+          }
+          <div modal-footer>
+            <button type="button" class="btn btn-ghost" (click)="confirmRemove.set(false)">Keep them</button>
+            <button type="button" class="btn btn-danger" (click)="remove(c.id)">Remove customer</button>
+          </div>
+        </app-modal>
+      }
     } @else {
       <div class="card">
         <app-empty-state icon="users" title="Customer not found">
@@ -137,6 +167,10 @@ export class CustomerProfilePage {
   store = inject(DataStoreService);
   flow = inject(OrderFlowService);
   private route = inject(ActivatedRoute);
+  private router = inject(Router);
+  private security = inject(SecurityService);
+  private toast = inject(ToastService);
+  confirmRemove = signal(false);
   formatCurrency = formatCurrency;
 
   id = this.route.snapshot.paramMap.get('id') ?? '';
@@ -152,6 +186,14 @@ export class CustomerProfilePage {
       .join('')
       .toUpperCase(),
   );
+
+  async remove(id: string): Promise<void> {
+    this.confirmRemove.set(false);
+    if (!(await this.security.guard('remove this customer'))) return;
+    this.store.removeCustomer(id);
+    this.toast.success('Customer removed');
+    this.router.navigate(['/customers']);
+  }
 
   bookingLabel(bookingId: string | null): string {
     if (!bookingId) return 'Counter sale';

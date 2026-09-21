@@ -1,4 +1,4 @@
-import { Directive, ElementRef, HostListener, OnDestroy, effect, inject, input } from '@angular/core';
+import { Directive, ElementRef, HostListener, OnDestroy, computed, effect, inject, input } from '@angular/core';
 
 type Placement = 'top' | 'bottom' | 'left' | 'right';
 
@@ -8,13 +8,21 @@ type Placement = 'top' | 'bottom' | 'left' | 'right';
  */
 @Directive({
   selector: '[appTooltip]',
-  host: { '[attr.aria-label]': 'appTooltip()' },
+  host: { '[attr.aria-label]': 'ariaLabel()' },
 })
 export class TooltipDirective implements OnDestroy {
   appTooltip = input.required<string>();
   tooltipPlacement = input<Placement>('top');
 
   private host = inject(ElementRef<HTMLElement>);
+
+  /**
+   * Icon-only controls get their accessible name from the tooltip, but an
+   * explicit aria-label on the element always wins — otherwise adding a tooltip
+   * would silently rename the control for screen readers.
+   */
+  private readonly ownLabel: string | null = this.host.nativeElement.getAttribute('aria-label');
+  ariaLabel = computed(() => this.ownLabel ?? this.appTooltip());
   private tip: HTMLElement | null = null;
   private hideTimer: ReturnType<typeof setTimeout> | null = null;
 

@@ -1,9 +1,10 @@
 import { DatePipe } from '@angular/common';
 import { Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { ActivatedRoute, RouterLink } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { ProductCategory, StockMovementType } from '../../core/models/models';
 import { DataStoreService } from '../../core/services/data-store.service';
+import { SecurityService } from '../../core/services/security.service';
 import { BadgeComponent } from '../../shared/ui/badge/badge';
 import { EmptyStateComponent } from '../../shared/ui/empty-state/empty-state';
 import { IconComponent } from '../../shared/ui/icon/icon';
@@ -34,6 +35,15 @@ const CATEGORIES: ProductCategory[] = ['Drinks', 'Cigarettes', 'Snacks', 'Food',
           </div>
           @if (!editMode()) {
             <button type="button" class="btn btn-secondary" (click)="startEdit()"><app-icon name="edit" [size]="15" /> Edit details</button>
+            <button
+              type="button"
+              class="btn btn-ghost btn-icon text-faint hover:text-danger"
+              (click)="confirmRemove.set(true)"
+              aria-label="Remove item"
+              [appTooltip]="'Hides the item from sale. Past sales keep their history.'"
+            >
+              <app-icon name="trash" [size]="16" />
+            </button>
           }
         </header>
 
@@ -135,6 +145,19 @@ const CATEGORIES: ProductCategory[] = ['Drinks', 'Cigarettes', 'Snacks', 'Food',
         </section>
       </div>
 
+      @if (confirmRemove()) {
+        <app-modal title="Remove this item?" (close)="confirmRemove.set(false)">
+          <p class="text-[13px] leading-relaxed text-ink-soft">
+            <strong>{{ p.name }}</strong> stops appearing when you add items to a bill. Past sales, stock history and reports
+            keep it exactly as it is.
+          </p>
+          <div modal-footer>
+            <button type="button" class="btn btn-ghost" (click)="confirmRemove.set(false)">Keep it</button>
+            <button type="button" class="btn btn-danger" (click)="remove(p.id)">Remove item</button>
+          </div>
+        </app-modal>
+      }
+
       @if (adjustMode()) {
         <app-modal [title]="adjustTitle()" (close)="adjustMode.set(null)">
           <div>
@@ -171,6 +194,8 @@ const CATEGORIES: ProductCategory[] = ['Drinks', 'Cigarettes', 'Snacks', 'Food',
 export class InventoryDetailPage {
   store = inject(DataStoreService);
   private route = inject(ActivatedRoute);
+  private router = inject(Router);
+  private security = inject(SecurityService);
   private toast = inject(ToastService);
   formatCurrency = formatCurrency;
   stockStatus = stockStatus;
@@ -181,6 +206,7 @@ export class InventoryDetailPage {
   history = computed(() => this.store.productMovements(this.id));
 
   editMode = signal(false);
+  confirmRemove = signal(false);
   form = { name: '', category: 'Drinks' as ProductCategory, costPrice: 0, sellingPrice: 0, minStock: 0, unit: 'piece' };
 
   adjustMode = signal<StockMovementType | null>(null);
@@ -192,9 +218,18 @@ export class InventoryDetailPage {
     return mode === 'add' ? 'Add stock' : mode === 'remove' ? 'Remove stock' : 'Correct count';
   });
 
-  startEdit(): void {
+  async remove(id: string): Promise<void> {
+    this.confirmRemove.set(false);
+    if (!(await this.security.guard('remove this item'))) return;
+    this.store.removeProduct(id);
+    this.toast.success('Item removed');
+    this.router.navigate(['/inventory']);
+  }
+
+  async startEdit(): Promise<void> {
     const p = this.product();
     if (!p) return;
+    if (!(await this.security.guard('edit this item'))) return;
     this.form = { name: p.name, category: p.category, costPrice: p.costPrice, sellingPrice: p.sellingPrice, minStock: p.minStock, unit: p.unit };
     this.editMode.set(true);
   }

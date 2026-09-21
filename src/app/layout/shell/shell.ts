@@ -5,6 +5,7 @@ import { OrderFlowService } from '../../core/services/order-flow.service';
 import { OrderDrawerComponent } from '../../features/operations/order-drawer';
 import { OrderDetailDrawerComponent } from '../../features/operations/order-detail-drawer';
 import { IconComponent } from '../../shared/ui/icon/icon';
+import { PasskeyPromptComponent } from '../../shared/ui/passkey-prompt/passkey-prompt';
 import { ToastOutletComponent } from '../../shared/ui/toast/toast-outlet';
 import { BottomNavComponent } from '../bottom-nav/bottom-nav';
 import { SidebarNavComponent } from '../sidebar-nav/sidebar-nav';
@@ -19,6 +20,7 @@ import { SidebarNavComponent } from '../sidebar-nav/sidebar-nav';
     ToastOutletComponent,
     OrderDrawerComponent,
     OrderDetailDrawerComponent,
+    PasskeyPromptComponent,
     IconComponent,
   ],
   template: `
@@ -50,6 +52,21 @@ import { SidebarNavComponent } from '../sidebar-nav/sidebar-nav';
           </span>
         </header>
 
+        @if (store.isHandover()) {
+          <a
+            routerLink="/settings"
+            class="flex items-center gap-2 border-b border-warn/30 bg-warn-soft px-4 py-2 text-[13px] font-medium text-ink sm:px-6 lg:px-8"
+          >
+            <app-icon name="users" [size]="15" />
+            <span class="min-w-0 flex-1 truncate">
+              Handover mode · <strong>{{ store.currentActor() }}</strong> is operating
+            </span>
+            <span class="flex shrink-0 items-center gap-1 font-semibold text-warn">
+              Manage <app-icon name="chevron-right" [size]="13" />
+            </span>
+          </a>
+        }
+
         <main class="mx-auto w-full max-w-[1400px] px-4 pt-5 pb-28 sm:px-6 lg:px-8 lg:pb-10">
           <router-outlet />
         </main>
@@ -66,6 +83,7 @@ import { SidebarNavComponent } from '../sidebar-nav/sidebar-nav';
     @if (flow.openBillId()) {
       <app-order-detail-drawer [billId]="flow.openBillId()!" />
     }
+    <app-passkey-prompt />
     <app-toast-outlet />
   `,
   host: { class: 'block' },

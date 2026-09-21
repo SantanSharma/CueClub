@@ -2,6 +2,7 @@ import { Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { ExpenseCategory } from '../../core/models/models';
 import { DataStoreService } from '../../core/services/data-store.service';
+import { SecurityService } from '../../core/services/security.service';
 import { BadgeComponent } from '../../shared/ui/badge/badge';
 import { EmptyStateComponent } from '../../shared/ui/empty-state/empty-state';
 import { IconComponent } from '../../shared/ui/icon/icon';
@@ -313,6 +314,7 @@ const EXPENSE_CATEGORIES: ExpenseCategory[] = ['Rent', 'Utilities', 'Salaries', 
 })
 export class AnalyticsPage {
   store = inject(DataStoreService);
+  private security = inject(SecurityService);
   private toast = inject(ToastService);
   formatCurrency = formatCurrency;
   formatDate = formatDate;
@@ -423,7 +425,8 @@ export class AnalyticsPage {
     this.expForm = { name: '', category: 'Other', amount: 0, date: todayStr(), notes: '' };
   }
 
-  removeExpense(id: string): void {
+  async removeExpense(id: string): Promise<void> {
+    if (!(await this.security.guard('remove this expense'))) return;
     this.store.removeExpense(id);
     this.toast.success('Expense removed');
   }
