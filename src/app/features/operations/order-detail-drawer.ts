@@ -1,10 +1,11 @@
 import { DatePipe } from '@angular/common';
-import { Component, computed, inject, input, signal } from '@angular/core';
+import { Component, computed, effect, inject, input, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import { BookingStatus } from '../../core/models/models';
 import { DataStoreService } from '../../core/services/data-store.service';
 import { OrderFlowService } from '../../core/services/order-flow.service';
+import { SecurityService } from '../../core/services/security.service';
 import { BadgeComponent } from '../../shared/ui/badge/badge';
 import { DrawerComponent } from '../../shared/ui/drawer/drawer';
 import { IconComponent } from '../../shared/ui/icon/icon';
@@ -14,25 +15,26 @@ import { TooltipDirective } from '../../shared/ui/tooltip/tooltip.directive';
 import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/util/format';
 
 /**
- * Everything about one tab — booking details, running bill, payments and the
- * actions a merchant needs mid-shift. Opens over the list, never navigates away.
+ * Everything about one order — booking details, each customer's bill, their
+ * payments, and the actions a merchant needs mid-shift. Split orders show one
+ * tab per customer so money stays tracked per person.
  */
 @Component({
   selector: 'app-order-detail-drawer',
   imports: [FormsModule, DatePipe, DrawerComponent, IconComponent, BadgeComponent, QuantityStepperComponent, TooltipDirective],
   template: `
-    @if (bill(); as bill) {
+    @if (activeBill(); as bill) {
       <app-drawer
-        [title]="customer()?.name ?? 'Bill'"
-        [subtitle]="(customer()?.mobile ?? '') + (booking() ? ' · ' + tableName() : ' · Counter sale')"
+        [title]="headerTitle()"
+        [subtitle]="headerSubtitle()"
         size="lg"
         (close)="flow.closeDetail()"
       >
         <div class="flex flex-col gap-3">
-          <!-- Status + quick actions -->
+          <!-- Status + booking actions -->
           <section class="card card-pad">
             <div class="flex flex-wrap items-center gap-2">
-              <app-badge [status]="bill.status" />
+              <app-badge [status]="groupStatus()" />
               @if (booking(); as bk) {
                 <app-badge [status]="bk.status" />
                 <span class="pill bg-surface-alt text-muted">
@@ -43,6 +45,25 @@ import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/uti
                 <span class="pill bg-surface-alt text-muted">{{ bill.createdAt | date: 'MMM d, h:mm a' }}</span>
               }
             </div>
+
+            @if (bills().length > 1) {
+              <div class="mt-3 grid grid-cols-3 gap-2 rounded-xl bg-canvas px-3 py-2.5">
+                <div>
+                  <p class="text-[11px] tracking-wide text-muted uppercase">Order total</p>
+                  <p class="text-[15px] font-extrabold text-ink tabular-nums">{{ formatCurrency(groupTotal()) }}</p>
+                </div>
+                <div>
+                  <p class="text-[11px] tracking-wide text-muted uppercase">Collected</p>
+                  <p class="text-[15px] font-extrabold text-ink tabular-nums">{{ formatCurrency(groupPaid()) }}</p>
+                </div>
+                <div>
+                  <p class="text-[11px] tracking-wide text-muted uppercase">Due</p>
+                  <p class="text-[15px] font-extrabold tabular-nums" [class]="groupDue() > 0 ? 'text-danger' : 'text-success'">
+                    {{ formatCurrency(groupDue()) }}
+                  </p>
+                </div>
+              </div>
+            }
 
             @if (booking(); as bk) {
               <div class="mt-3 flex flex-wrap gap-2">
@@ -71,10 +92,34 @@ import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/uti
             }
           </section>
 
+          <!-- Customer tabs for split orders -->
+          @if (bills().length > 1) {
+            <!-- Wraps rather than scrolls — with four or more people a hidden
+                 overflow would clip names with no affordance. -->
+            <div class="flex flex-wrap gap-2">
+              @for (b of bills(); track b.id) {
+                <button
+                  type="button"
+                  class="chip max-w-full"
+                  [class.chip-active]="b.id === selectedBillId()"
+                  (click)="selectedBillId.set(b.id)"
+                >
+                  <span class="min-w-0 truncate">{{ customerName(b.customerId) }}</span>
+                  <span class="pill shrink-0 px-1.5 py-0 text-[11px]"
+                    [class]="b.total - b.paidAmount > 0 ? 'bg-danger-soft text-danger' : 'bg-success-soft text-success'">
+                    {{ formatCurrency(b.total - b.paidAmount) }}
+                  </span>
+                </button>
+              }
+            </div>
+          }
+
           <!-- Bill -->
           <section class="card overflow-hidden">
             <div class="flex items-center justify-between border-b border-line px-4 py-3">
-              <h3 class="text-[13px] font-semibold text-ink">Bill</h3>
+              <h3 class="text-[13px] font-semibold text-ink">
+                {{ bills().length > 1 ? customerName(bill.customerId) + "'s bill" : 'Bill' }}
+              </h3>
               @if (bill.status !== 'paid') {
                 <button type="button" class="btn btn-ghost btn-sm" (click)="showItems.set(!showItems())">
                   <app-icon name="plus" [size]="14" /> Add item
@@ -111,7 +156,7 @@ import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/uti
                       [value]="item.qty"
                       [min]="0"
                       [max]="stockCeiling(item.refId, item.qty)"
-                      (valueChange)="store.setBillItemQty(bill.id, item.id, $event)"
+                      (valueChange)="setQty(bill.id, item.id, $event)"
                     />
                   } @else if (item.type === 'product') {
                     <span class="text-[13px] text-muted">×{{ item.qty }}</span>
@@ -163,8 +208,13 @@ import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/uti
             @if (payments().length) {
               <div class="mt-3 flex flex-col gap-1.5 border-t border-line pt-3">
                 @for (p of payments(); track p.id) {
-                  <div class="flex justify-between text-[13px]">
-                    <span class="text-muted">{{ p.date | date: 'MMM d, h:mm a' }}</span>
+                  <div class="flex items-center justify-between gap-2 text-[13px]">
+                    <span class="min-w-0 truncate text-muted">
+                      {{ p.date | date: 'MMM d, h:mm a' }}
+                      @if (p.actor && p.actor !== 'Admin') {
+                        <span class="text-faint">· {{ p.actor }}</span>
+                      }
+                    </span>
                     <span class="font-semibold tabular-nums">{{ formatCurrency(p.amount) }}</span>
                   </div>
                 }
@@ -172,7 +222,7 @@ import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/uti
             }
           </section>
 
-          <button type="button" class="btn btn-secondary w-full" (click)="viewCustomer()">
+          <button type="button" class="btn btn-secondary w-full" (click)="viewCustomer(bill.customerId)">
             <app-icon name="users" [size]="15" /> View customer history
           </button>
         </div>
@@ -186,6 +236,7 @@ export class OrderDetailDrawerComponent {
 
   store = inject(DataStoreService);
   flow = inject(OrderFlowService);
+  private security = inject(SecurityService);
   private toast = inject(ToastService);
   private router = inject(Router);
 
@@ -197,17 +248,57 @@ export class OrderDetailDrawerComponent {
   showItems = signal(false);
   productQuery = signal('');
   payAmount = 0;
+  selectedBillId = signal<string | null>(null);
 
-  bill = computed(() => this.store.billById(this.billId()));
+  constructor() {
+    // Follow the bill the caller opened; split orders then switch by tab.
+    effect(() => {
+      const incoming = this.billId();
+      if (!this.selectedBillId() || !this.bills().some((b) => b.id === this.selectedBillId())) {
+        this.selectedBillId.set(incoming);
+      }
+    });
+  }
+
+  private sourceBill = computed(() => this.store.billById(this.billId()));
+  bills = computed(() => {
+    const source = this.sourceBill();
+    return source ? this.store.billsInGroup(source.groupId) : [];
+  });
+  activeBill = computed(() => this.bills().find((b) => b.id === this.selectedBillId()) ?? this.sourceBill());
+
   booking = computed(() => {
-    const id = this.bill()?.bookingId;
+    const id = this.sourceBill()?.bookingId;
     return id ? this.store.bookingById(id) : undefined;
   });
-  customer = computed(() => this.store.customers().find((c) => c.id === this.bill()?.customerId));
   tableName = computed(() => this.store.tables().find((t) => t.id === this.booking()?.tableId)?.name ?? '');
-  payments = computed(() => this.store.billPayments(this.billId()));
+
+  headerTitle = computed(() => {
+    const list = this.bills();
+    if (list.length > 1) return `${list.length} customers`;
+    return this.customerName(this.activeBill()?.customerId ?? '');
+  });
+
+  headerSubtitle = computed(() => {
+    const context = this.booking() ? this.tableName() : 'Counter sale';
+    if (this.bills().length > 1) {
+      return `${this.bills().map((b) => this.customerName(b.customerId)).join(', ')} · ${context}`;
+    }
+    const customer = this.store.customers().find((c) => c.id === this.activeBill()?.customerId);
+    return `${customer?.mobile ?? ''} · ${context}`;
+  });
+
+  groupTotal = computed(() => this.bills().reduce((s, b) => s + b.total, 0));
+  groupPaid = computed(() => this.bills().reduce((s, b) => s + b.paidAmount, 0));
+  groupDue = computed(() => this.groupTotal() - this.groupPaid());
+  groupStatus = computed(() => {
+    if (this.groupDue() <= 0) return 'paid';
+    return this.groupPaid() > 0 ? 'partial' : 'unpaid';
+  });
+
+  payments = computed(() => this.store.billPayments(this.activeBill()?.id ?? ''));
   remaining = computed(() => {
-    const b = this.bill();
+    const b = this.activeBill();
     return b ? b.total - b.paidAmount : 0;
   });
 
@@ -216,15 +307,25 @@ export class OrderDetailDrawerComponent {
     return this.store.products().filter((p) => !q || p.name.toLowerCase().includes(q));
   });
 
+  customerName(customerId: string): string {
+    return this.store.customers().find((c) => c.id === customerId)?.name ?? 'Unknown';
+  }
+
   stockCeiling(productId: string, currentQty: number): number {
     return (this.store.productById(productId)?.stock ?? 0) + currentQty;
   }
 
   addItem(productId: string): void {
+    const bill = this.activeBill();
     const product = this.store.productById(productId);
-    if (!product) return;
-    this.store.addProductToBill(this.billId(), product, 1);
+    if (!bill || !product) return;
+    this.store.addProductToBill(bill.id, product, 1);
     this.toast.success(`${product.name} added`);
+  }
+
+  async setQty(billId: string, itemId: string, qty: number): Promise<void> {
+    if (!(await this.security.guard('change this bill'))) return;
+    this.store.setBillItemQty(billId, itemId, qty);
   }
 
   collect(billId: string): void {
@@ -241,25 +342,25 @@ export class OrderDetailDrawerComponent {
     this.toast.success('Bill settled');
   }
 
-  setStatus(status: BookingStatus): void {
+  async setStatus(status: BookingStatus): Promise<void> {
     const booking = this.booking();
     if (!booking) return;
+    if (status === 'cancelled' && !(await this.security.guard('cancel this booking'))) return;
     this.store.updateBookingStatus(booking.id, status);
     const labels: Record<string, string> = { ongoing: 'Session started', completed: 'Booking completed', cancelled: 'Booking cancelled' };
     this.toast.success(labels[status] ?? 'Booking updated');
   }
 
-  edit(): void {
+  async edit(): Promise<void> {
     const booking = this.booking();
     if (!booking) return;
+    if (!(await this.security.guard('edit this booking'))) return;
     this.flow.closeDetail();
     this.flow.editBooking(booking.id, booking.customerId);
   }
 
-  viewCustomer(): void {
-    const id = this.bill()?.customerId;
-    if (!id) return;
+  viewCustomer(customerId: string): void {
     this.flow.closeDetail();
-    this.router.navigate(['/customers', id]);
+    this.router.navigate(['/customers', customerId]);
   }
 }

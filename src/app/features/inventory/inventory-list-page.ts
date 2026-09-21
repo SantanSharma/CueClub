@@ -9,7 +9,8 @@ import { IconComponent } from '../../shared/ui/icon/icon';
 import { ModalComponent } from '../../shared/ui/modal/modal';
 import { ToastService } from '../../shared/ui/toast/toast.service';
 import { TooltipDirective } from '../../shared/ui/tooltip/tooltip.directive';
-import { formatCurrency, stockStatus } from '../../shared/util/format';
+import { downloadCsv } from '../../shared/util/csv-export';
+import { addDays, formatCurrency, formatDate, stockStatus, todayStr } from '../../shared/util/format';
 
 const CATEGORIES: ProductCategory[] = ['Drinks', 'Cigarettes', 'Snacks', 'Food', 'Other'];
 
@@ -25,9 +26,15 @@ const CATEGORIES: ProductCategory[] = ['Drinks', 'Cigarettes', 'Snacks', 'Food',
             {{ store.products().length }} items · stock updates automatically as you sell
           </p>
         </div>
-        <button type="button" class="btn btn-primary" (click)="showAdd.set(true)">
-          <app-icon name="plus" [size]="16" /> Add item
-        </button>
+        <div class="flex flex-wrap gap-2">
+          <button type="button" class="btn btn-secondary" (click)="showExport.set(true)"
+            [appTooltip]="'Download stock levels and movements for a date range as a CSV file'">
+            <app-icon name="download" [size]="16" /> Export
+          </button>
+          <button type="button" class="btn btn-primary" (click)="showAdd.set(true)">
+            <app-icon name="plus" [size]="16" /> Add item
+          </button>
+        </div>
       </header>
 
       @if (alerts().length) {
@@ -160,6 +167,35 @@ const CATEGORIES: ProductCategory[] = ['Drinks', 'Cigarettes', 'Snacks', 'Food',
         </div>
       </app-modal>
     }
+
+    @if (showExport()) {
+      <app-modal title="Export inventory" (close)="showExport.set(false)">
+        <p class="text-[13px] leading-relaxed text-ink-soft">
+          Downloads every item with its cost, price, stock and value, plus the stock movements recorded between
+          <strong>{{ formatDate(from()) }}</strong> and <strong>{{ formatDate(to()) }}</strong>, as a CSV file that opens in Excel.
+        </p>
+        <div class="flex flex-wrap gap-2">
+          <button type="button" class="chip" [class.chip-active]="preset() === 'today'" (click)="setPreset('today')">Day</button>
+          <button type="button" class="chip" [class.chip-active]="preset() === 'week'" (click)="setPreset('week')">Week</button>
+          <button type="button" class="chip" [class.chip-active]="preset() === 'month'" (click)="setPreset('month')">30 days</button>
+          <button type="button" class="chip" [class.chip-active]="preset() === 'custom'" (click)="preset.set('custom')">Custom</button>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="field-label">From</label>
+            <input class="input" type="date" [ngModel]="from()" (ngModelChange)="from.set($event); preset.set('custom')" />
+          </div>
+          <div>
+            <label class="field-label">To</label>
+            <input class="input" type="date" [ngModel]="to()" (ngModelChange)="to.set($event); preset.set('custom')" />
+          </div>
+        </div>
+        <div modal-footer>
+          <button type="button" class="btn btn-ghost" (click)="showExport.set(false)">Cancel</button>
+          <button type="button" class="btn btn-primary" (click)="exportCsv()"><app-icon name="download" [size]="15" /> Download CSV</button>
+        </div>
+      </app-modal>
+    }
   `,
   host: { class: 'block animate-fade-up' },
 })
@@ -174,6 +210,66 @@ export class InventoryListPage {
   category = signal<string>('');
   showAdd = signal(false);
   form = { name: '', category: 'Drinks' as ProductCategory, costPrice: 0, sellingPrice: 0, stock: 0, minStock: 5, unit: 'piece' };
+
+  // Export range — same presets and CSV helper the Analytics export uses.
+  showExport = signal(false);
+  preset = signal<'today' | 'week' | 'month' | 'custom'>('week');
+  from = signal(addDays(todayStr(), -6));
+  to = signal(todayStr());
+  formatDate = formatDate;
+
+  setPreset(p: 'today' | 'week' | 'month'): void {
+    this.preset.set(p);
+    const today = todayStr();
+    this.to.set(today);
+    this.from.set(p === 'today' ? today : addDays(today, p === 'week' ? -6 : -29));
+  }
+
+  exportCsv(): void {
+    const movements = this.store.movementsInRange(this.from(), this.to());
+    const rows: Record<string, unknown>[] = this.store.products().map((p) => {
+      const inRange = movements.filter((m) => m.productId === p.id);
+      const added = inRange.filter((m) => m.qty > 0).reduce((s, m) => s + m.qty, 0);
+      const sold = inRange.filter((m) => m.type === 'sale').reduce((s, m) => s + Math.abs(m.qty), 0);
+      return {
+        Item: p.name,
+        Category: p.category,
+        Unit: p.unit,
+        'Cost Price': p.costPrice,
+        'Selling Price': p.sellingPrice,
+        Margin: p.sellingPrice - p.costPrice,
+        'Current Stock': p.stock,
+        'Minimum Stock': p.minStock,
+        Status: stockStatus(p.stock, p.minStock),
+        'Stock Value': p.stock * p.costPrice,
+        'Stock Added (range)': added,
+        'Sold (range)': sold,
+        'Last Updated': p.updatedAt.slice(0, 10),
+      };
+    });
+
+    for (const m of movements) {
+      rows.push({
+        Item: this.store.productById(m.productId)?.name ?? '',
+        Category: 'Stock movement',
+        Unit: '',
+        'Cost Price': '',
+        'Selling Price': '',
+        Margin: '',
+        'Current Stock': '',
+        'Minimum Stock': '',
+        Status: m.type,
+        'Stock Value': '',
+        'Stock Added (range)': m.qty > 0 ? m.qty : '',
+        'Sold (range)': m.qty < 0 ? Math.abs(m.qty) : '',
+        'Last Updated': m.date.slice(0, 10),
+      });
+    }
+
+    downloadCsv(`cueclub-inventory_${this.from()}_to_${this.to()}.csv`, rows);
+    this.toast.success('Inventory exported');
+    this.showExport.set(false);
+  }
 
   rows = computed(() => {
     const q = this.search().trim().toLowerCase();

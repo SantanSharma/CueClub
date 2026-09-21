@@ -1,5 +1,6 @@
 import { Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { Bill, PaymentStatus } from '../../core/models/models';
 import { DataStoreService } from '../../core/services/data-store.service';
 import { OrderFlowService } from '../../core/services/order-flow.service';
 import { BadgeComponent } from '../../shared/ui/badge/badge';
@@ -10,6 +11,12 @@ import { addDays, formatCurrency, formatTime12, relativeDayLabel, todayStr } fro
 
 type Preset = 'today' | 'yesterday' | 'week' | 'custom';
 type Filter = 'all' | 'running' | 'upcoming' | 'unpaid' | 'done';
+
+/** Payment state of a whole order, which may span several customers' bills. */
+function paymentStatusFor(total: number, paid: number): PaymentStatus {
+  if (total <= 0 || paid >= total) return 'paid';
+  return paid > 0 ? 'partial' : 'unpaid';
+}
 
 /**
  * The merchant's home base: what is happening on the tables right now and
@@ -139,7 +146,12 @@ type Filter = 'all' | 'running' | 'upcoming' | 'unpaid' | 'done';
                 @for (r of rows(); track r.billId) {
                   <tr class="row-hover cursor-pointer border-b border-line-soft last:border-0" (click)="flow.openDetail(r.billId)">
                     <td class="px-4 py-3">
-                      <div class="font-semibold text-ink">{{ r.customerName }}</div>
+                      <div class="flex items-center gap-1.5">
+                        <span class="font-semibold text-ink">{{ r.customerName }}</span>
+                        @if (r.customerCount > 1) {
+                          <span class="pill bg-primary-soft text-primary-darker">+{{ r.customerCount - 1 }}</span>
+                        }
+                      </div>
                       <div class="text-xs text-muted">{{ r.mobile }}</div>
                     </td>
                     <td class="px-4 py-3">
@@ -168,7 +180,12 @@ type Filter = 'all' | 'running' | 'upcoming' | 'unpaid' | 'done';
               <button type="button" class="card card-pad text-left transition active:scale-[0.99]" (click)="flow.openDetail(r.billId)">
                 <div class="flex items-start gap-3">
                   <div class="min-w-0 flex-1">
-                    <p class="truncate text-[15px] font-bold text-ink">{{ r.customerName }}</p>
+                    <p class="flex items-center gap-1.5 truncate text-[15px] font-bold text-ink">
+                      {{ r.customerName }}
+                      @if (r.customerCount > 1) {
+                        <span class="pill bg-primary-soft text-primary-darker">+{{ r.customerCount - 1 }}</span>
+                      }
+                    </p>
                     <p class="text-xs text-muted">{{ r.mobile }}</p>
                   </div>
                   <div class="text-right">
@@ -284,6 +301,16 @@ export class OperationsPage {
     }),
   );
 
+  /** Everyone on the order is searchable, not just the primary customer. */
+  private searchBlobFor(customerIds: string[], tableName?: string): string {
+    const people = customerIds
+      .map((id) => this.store.customers().find((c) => c.id === id))
+      .filter((c): c is NonNullable<typeof c> => !!c)
+      .map((c) => `${c.name} ${c.mobile}`)
+      .join(' ');
+    return `${people} ${tableName ?? ''}`.toLowerCase();
+  }
+
   tapTable(card: { status: string; billId?: string }): void {
     if (card.billId) {
       this.flow.openDetail(card.billId);
@@ -298,57 +325,76 @@ export class OperationsPage {
     const to = this.to();
     const q = this.search().trim().toLowerCase();
 
+    // A split order is several bills sharing a group — show it as one row and
+    // let the detail drawer break it down per customer.
     const bookingRows = this.store
       .bookings()
       .filter((b) => b.date >= from && b.date <= to)
       .map((b) => {
-        const bill = this.store.billById(b.billId);
-        const c = this.store.customers().find((x) => x.id === b.customerId);
+        const bills = this.store.billsInGroup(b.id);
         const table = this.store.tables().find((t) => t.id === b.tableId);
-        const productCount = bill?.items.filter((i) => i.type === 'product').reduce((s, i) => s + i.qty, 0) ?? 0;
+        const total = bills.reduce((s, x) => s + x.total, 0) || b.finalPrice;
+        const paid = bills.reduce((s, x) => s + x.paidAmount, 0);
+        const productCount = bills.reduce(
+          (s, x) => s + x.items.filter((i) => i.type === 'product').reduce((n, i) => n + i.qty, 0),
+          0,
+        );
+        const primary = this.store.customers().find((x) => x.id === b.customerId);
+        const parts = [`${b.durationHours}h table time`];
+        if (productCount) parts.push(`${productCount} item(s)`);
         return {
-          billId: b.billId,
-          customerName: c?.name ?? 'Unknown',
-          mobile: c?.mobile ?? '',
+          billId: bills[0]?.id ?? b.billId,
+          customerName: primary?.name ?? 'Unknown',
+          customerCount: b.customerIds.length,
+          searchBlob: this.searchBlobFor(b.customerIds, table?.name),
+          mobile: b.customerIds.length > 1 ? `${b.customerIds.length} people splitting` : (primary?.mobile ?? ''),
           tableName: table?.name ?? '',
           when: `${formatTime12(b.startTime)}–${formatTime12(b.endTime)}`,
           sortKey: `${b.date} ${b.startTime}`,
           bookingStatus: b.status as string,
-          paymentStatus: bill?.status ?? 'unpaid',
-          total: bill?.total ?? b.finalPrice,
-          due: (bill?.total ?? b.finalPrice) - (bill?.paidAmount ?? 0),
-          itemsLabel: productCount ? `${b.durationHours}h · ${productCount} item(s)` : `${b.durationHours}h table time`,
+          paymentStatus: paymentStatusFor(total, paid),
+          total,
+          due: total - paid,
+          itemsLabel: parts.join(' · '),
         };
       });
 
-    const saleRows = this.store
-      .bills()
-      .filter((b) => !b.bookingId)
-      .filter((b) => {
-        const d = b.createdAt.slice(0, 10);
-        return d >= from && d <= to;
-      })
-      .map((b) => {
-        const c = this.store.customers().find((x) => x.id === b.customerId);
-        const count = b.items.reduce((s, i) => s + i.qty, 0);
-        const time = new Date(b.createdAt);
-        return {
-          billId: b.id,
-          customerName: c?.name ?? 'Unknown',
-          mobile: c?.mobile ?? '',
-          tableName: '',
-          when: time.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' }),
-          sortKey: b.createdAt,
-          bookingStatus: '',
-          paymentStatus: b.status,
-          total: b.total,
-          due: b.total - b.paidAmount,
-          itemsLabel: `${count} item(s)`,
-        };
-      });
+    const saleGroups = new Map<string, Bill[]>();
+    for (const bill of this.store.bills()) {
+      if (bill.bookingId) continue;
+      const d = bill.createdAt.slice(0, 10);
+      if (d < from || d > to) continue;
+      const list = saleGroups.get(bill.groupId) ?? [];
+      list.push(bill);
+      saleGroups.set(bill.groupId, list);
+    }
+
+    const saleRows = [...saleGroups.values()].map((bills) => {
+      const first = bills[0];
+      const primary = this.store.customers().find((x) => x.id === first.customerId);
+      const total = bills.reduce((s, b) => s + b.total, 0);
+      const paid = bills.reduce((s, b) => s + b.paidAmount, 0);
+      const count = bills.reduce((s, b) => s + b.items.reduce((n, i) => n + i.qty, 0), 0);
+      const time = new Date(first.createdAt);
+      return {
+        billId: first.id,
+        customerName: primary?.name ?? 'Unknown',
+        customerCount: bills.length,
+        searchBlob: this.searchBlobFor(bills.map((b) => b.customerId)),
+        mobile: bills.length > 1 ? `${bills.length} people splitting` : (primary?.mobile ?? ''),
+        tableName: '',
+        when: time.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' }),
+        sortKey: first.createdAt,
+        bookingStatus: '',
+        paymentStatus: paymentStatusFor(total, paid),
+        total,
+        due: total - paid,
+        itemsLabel: `${count} item(s)`,
+      };
+    });
 
     return [...bookingRows, ...saleRows]
-      .filter((r) => !q || r.customerName.toLowerCase().includes(q) || r.mobile.includes(q) || r.tableName.toLowerCase().includes(q))
+      .filter((r) => !q || r.searchBlob.includes(q))
       .filter((r) => {
         switch (this.filter()) {
           case 'running':

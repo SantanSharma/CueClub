@@ -1,5 +1,7 @@
 import { uid } from './storage.service';
 import {
+  ADMIN_ACTOR,
+  AppConfig,
   AppData,
   Bill,
   BillLineItem,
@@ -9,6 +11,7 @@ import {
   Payment,
   PoolTable,
   Product,
+  SCHEMA_VERSION,
   StockMovement,
 } from '../models/models';
 
@@ -28,34 +31,65 @@ function addMinutes(d: Date, mins: number): Date {
   return new Date(d.getTime() + mins * 60000);
 }
 
+export function defaultConfig(shopName = 'Cue & Cushion Club'): AppConfig {
+  return {
+    shopName,
+    openingTime: '11:00',
+    closingTime: '23:30',
+    mode: 'admin',
+    activeHandoverId: null,
+    passkeyHash: null,
+    passkeySalt: null,
+    safetyMode: false,
+  };
+}
+
+/** A clean install — no tables, customers, stock or history. */
+export function buildEmptyData(): AppData {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    tables: [],
+    customers: [],
+    bookings: [],
+    products: [],
+    stockMovements: [],
+    bills: [],
+    payments: [],
+    expenses: [],
+    handovers: [],
+    auditLog: [],
+    config: defaultConfig('My Pool Club'),
+  };
+}
+
 export function buildSeedData(): AppData {
   const now = new Date();
   const today = dateStr(now);
   const nowIso = now.toISOString();
 
   const tables: PoolTable[] = [
-    { id: uid(), name: 'Table 1', hourlyRate: 200, underMaintenance: false, createdAt: nowIso },
-    { id: uid(), name: 'Table 2', hourlyRate: 200, underMaintenance: false, createdAt: nowIso },
-    { id: uid(), name: 'Table 3', hourlyRate: 250, underMaintenance: false, createdAt: nowIso },
+    { id: uid(), name: 'Table 1', hourlyRate: 200, underMaintenance: false, createdAt: nowIso, isDel: 0 },
+    { id: uid(), name: 'Table 2', hourlyRate: 200, underMaintenance: false, createdAt: nowIso, isDel: 0 },
+    { id: uid(), name: 'Table 3', hourlyRate: 250, underMaintenance: false, createdAt: nowIso, isDel: 0 },
   ];
 
   const customers: Customer[] = [
-    { id: uid(), name: 'Priya Sharma', mobile: '9876543210', createdAt: nowIso },
-    { id: uid(), name: 'Rahul Verma', mobile: '9812345678', createdAt: nowIso },
-    { id: uid(), name: 'Amit Khanna', mobile: '9900112233', createdAt: nowIso },
-    { id: uid(), name: 'Sneha Rao', mobile: '9765432109', createdAt: nowIso },
-    { id: uid(), name: 'John Fernandes', mobile: '9654321098', createdAt: nowIso },
+    { id: uid(), name: 'Priya Sharma', mobile: '9876543210', createdAt: nowIso, isDel: 0 },
+    { id: uid(), name: 'Rahul Verma', mobile: '9812345678', createdAt: nowIso, isDel: 0 },
+    { id: uid(), name: 'Amit Khanna', mobile: '9900112233', createdAt: nowIso, isDel: 0 },
+    { id: uid(), name: 'Sneha Rao', mobile: '9765432109', createdAt: nowIso, isDel: 0 },
+    { id: uid(), name: 'John Fernandes', mobile: '9654321098', createdAt: nowIso, isDel: 0 },
   ];
 
   const products: Product[] = [
-    { id: uid(), name: 'Cold Drink', category: 'Drinks', costPrice: 20, sellingPrice: 40, stock: 42, minStock: 15, unit: 'bottle', createdAt: nowIso, updatedAt: nowIso },
-    { id: uid(), name: 'Mineral Water', category: 'Drinks', costPrice: 10, sellingPrice: 20, stock: 60, minStock: 20, unit: 'bottle', createdAt: nowIso, updatedAt: nowIso },
-    { id: uid(), name: 'Cigarettes (pack)', category: 'Cigarettes', costPrice: 15, sellingPrice: 20, stock: 8, minStock: 10, unit: 'pack', createdAt: nowIso, updatedAt: nowIso },
-    { id: uid(), name: 'Chips', category: 'Snacks', costPrice: 15, sellingPrice: 30, stock: 25, minStock: 10, unit: 'packet', createdAt: nowIso, updatedAt: nowIso },
-    { id: uid(), name: 'Namkeen', category: 'Snacks', costPrice: 20, sellingPrice: 50, stock: 3, minStock: 8, unit: 'packet', createdAt: nowIso, updatedAt: nowIso },
-    { id: uid(), name: 'Sandwich', category: 'Food', costPrice: 35, sellingPrice: 70, stock: 0, minStock: 5, unit: 'piece', createdAt: nowIso, updatedAt: nowIso },
-    { id: uid(), name: 'Tea', category: 'Food', costPrice: 8, sellingPrice: 20, stock: 40, minStock: 10, unit: 'cup', createdAt: nowIso, updatedAt: nowIso },
-    { id: uid(), name: 'Energy Drink', category: 'Drinks', costPrice: 45, sellingPrice: 80, stock: 18, minStock: 10, unit: 'can', createdAt: nowIso, updatedAt: nowIso },
+    { id: uid(), name: 'Cold Drink', category: 'Drinks', costPrice: 20, sellingPrice: 40, stock: 42, minStock: 15, unit: 'bottle', createdAt: nowIso, updatedAt: nowIso, isDel: 0 },
+    { id: uid(), name: 'Mineral Water', category: 'Drinks', costPrice: 10, sellingPrice: 20, stock: 60, minStock: 20, unit: 'bottle', createdAt: nowIso, updatedAt: nowIso, isDel: 0 },
+    { id: uid(), name: 'Cigarettes (pack)', category: 'Cigarettes', costPrice: 15, sellingPrice: 20, stock: 8, minStock: 10, unit: 'pack', createdAt: nowIso, updatedAt: nowIso, isDel: 0 },
+    { id: uid(), name: 'Chips', category: 'Snacks', costPrice: 15, sellingPrice: 30, stock: 25, minStock: 10, unit: 'packet', createdAt: nowIso, updatedAt: nowIso, isDel: 0 },
+    { id: uid(), name: 'Namkeen', category: 'Snacks', costPrice: 20, sellingPrice: 50, stock: 3, minStock: 8, unit: 'packet', createdAt: nowIso, updatedAt: nowIso, isDel: 0 },
+    { id: uid(), name: 'Sandwich', category: 'Food', costPrice: 35, sellingPrice: 70, stock: 0, minStock: 5, unit: 'piece', createdAt: nowIso, updatedAt: nowIso, isDel: 0 },
+    { id: uid(), name: 'Tea', category: 'Food', costPrice: 8, sellingPrice: 20, stock: 40, minStock: 10, unit: 'cup', createdAt: nowIso, updatedAt: nowIso, isDel: 0 },
+    { id: uid(), name: 'Energy Drink', category: 'Drinks', costPrice: 45, sellingPrice: 80, stock: 18, minStock: 10, unit: 'can', createdAt: nowIso, updatedAt: nowIso, isDel: 0 },
   ];
 
   const stockMovements: StockMovement[] = products.map((p) => ({
@@ -65,6 +99,7 @@ export function buildSeedData(): AppData {
     qty: p.stock,
     note: 'Opening stock',
     date: nowIso,
+    isDel: 0,
   }));
 
   const bookings: Booking[] = [];
@@ -116,6 +151,7 @@ export function buildSeedData(): AppData {
     bookings.push({
       id: bookingId,
       customerId: customer.id,
+      customerIds: [customer.id],
       tableId: table.id,
       date: dateStr(start),
       startTime: timeStr(start),
@@ -127,23 +163,27 @@ export function buildSeedData(): AppData {
       priceOverridden: false,
       status,
       billId,
+      splitMode: 'equal',
       createdAt: start.toISOString(),
+      isDel: 0,
     });
 
     bills.push({
       id: billId,
       customerId: customer.id,
       bookingId,
+      groupId: bookingId,
       items,
       total,
       paidAmount,
       status: billStatus,
       createdAt: start.toISOString(),
       updatedAt: nowIso,
+      isDel: 0,
     });
 
     if (paidAmount > 0) {
-      payments.push({ id: uid(), billId, amount: paidAmount, date: nowIso, note: '' });
+      payments.push({ id: uid(), billId, amount: paidAmount, date: nowIso, note: '', actor: ADMIN_ACTOR, isDel: 0 });
     }
   }
 
@@ -176,21 +216,24 @@ export function buildSeedData(): AppData {
       id: billId,
       customerId: customers[4].id,
       bookingId: null,
+      groupId: billId,
       items,
       total,
       paidAmount: 0,
       status: 'unpaid',
       createdAt: addMinutes(now, -20).toISOString(),
       updatedAt: nowIso,
+      isDel: 0,
     });
   }
 
   const expenses: Expense[] = [
-    { id: uid(), name: 'Electricity Bill', category: 'Utilities', amount: 3200, date: today, notes: '' },
-    { id: uid(), name: 'Cleaning Supplies', category: 'Supplies', amount: 450, date: today, notes: 'Table cloth + cleaner' },
+    { id: uid(), name: 'Electricity Bill', category: 'Utilities', amount: 3200, date: today, notes: '', isDel: 0 },
+    { id: uid(), name: 'Cleaning Supplies', category: 'Supplies', amount: 450, date: today, notes: 'Table cloth + cleaner', isDel: 0 },
   ];
 
   return {
+    schemaVersion: SCHEMA_VERSION,
     tables,
     customers,
     bookings,
@@ -199,6 +242,8 @@ export function buildSeedData(): AppData {
     bills,
     payments,
     expenses,
-    config: { shopName: 'Cue & Cushion Club', openingTime: '11:00', closingTime: '23:30' },
+    handovers: [],
+    auditLog: [],
+    config: defaultConfig(),
   };
 }
