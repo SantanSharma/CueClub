@@ -7,6 +7,8 @@ export interface OrderFlowState {
   mode: OrderMode;
   /** Pre-selected customer, e.g. when starting from a customer profile. */
   customerId: string | null;
+  /** Pre-selected table, e.g. when starting from the floor view. */
+  tableId: string | null;
   /** Set when editing an existing booking instead of creating one. */
   editBookingId: string | null;
 }
@@ -24,26 +26,27 @@ export class OrderFlowService {
     open: false,
     mode: 'booking',
     customerId: null,
+    tableId: null,
     editBookingId: null,
   });
 
   /** Bill currently shown in the detail drawer, if any. */
   readonly openBillId = signal<string | null>(null);
 
-  startBooking(customerId: string | null = null): void {
-    this.state.set({ open: true, mode: 'booking', customerId, editBookingId: null });
+  startBooking(customerId: string | null = null, tableId: string | null = null): void {
+    this.state.set({ open: true, mode: 'booking', customerId, tableId, editBookingId: null });
   }
 
   startSale(customerId: string | null = null): void {
-    this.state.set({ open: true, mode: 'sale', customerId, editBookingId: null });
+    this.state.set({ open: true, mode: 'sale', customerId, tableId: null, editBookingId: null });
   }
 
   editBooking(bookingId: string, customerId: string): void {
-    this.state.set({ open: true, mode: 'booking', customerId, editBookingId: bookingId });
+    this.state.set({ open: true, mode: 'booking', customerId, tableId: null, editBookingId: bookingId });
   }
 
   close(): void {
-    this.state.update((s) => ({ ...s, open: false, editBookingId: null, customerId: null }));
+    this.state.update((s) => ({ ...s, open: false, editBookingId: null, customerId: null, tableId: null }));
   }
 
   openDetail(billId: string): void {

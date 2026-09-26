@@ -7,7 +7,7 @@ import { BadgeComponent } from '../../shared/ui/badge/badge';
 import { EmptyStateComponent } from '../../shared/ui/empty-state/empty-state';
 import { IconComponent } from '../../shared/ui/icon/icon';
 import { TooltipDirective } from '../../shared/ui/tooltip/tooltip.directive';
-import { addDays, formatCurrency, formatTime12, relativeDayLabel, todayStr } from '../../shared/util/format';
+import { addDays, formatCurrency, formatDuration, formatTime12, relativeDayLabel, todayStr } from '../../shared/util/format';
 
 type Preset = 'today' | 'yesterday' | 'week' | 'custom';
 type Filter = 'all' | 'running' | 'upcoming' | 'unpaid' | 'done';
@@ -340,7 +340,7 @@ export class OperationsPage {
           0,
         );
         const primary = this.store.customers().find((x) => x.id === b.customerId);
-        const parts = [`${b.durationHours}h table time`];
+        const parts = [`${formatDuration(b.durationHours)} table time`];
         if (productCount) parts.push(`${productCount} item(s)`);
         return {
           billId: bills[0]?.id ?? b.billId,

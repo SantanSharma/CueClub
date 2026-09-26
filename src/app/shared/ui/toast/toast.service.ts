@@ -1,9 +1,16 @@
 import { Injectable, signal } from '@angular/core';
 
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
+
 export interface Toast {
   id: number;
   message: string;
   kind: 'success' | 'error' | 'info';
+  /** Optional one-tap follow-up, e.g. Undo on a delete. */
+  action?: ToastAction;
 }
 
 let nextId = 1;
@@ -12,14 +19,15 @@ let nextId = 1;
 export class ToastService {
   readonly toasts = signal<Toast[]>([]);
 
-  show(message: string, kind: Toast['kind'] = 'success'): void {
-    const toast: Toast = { id: nextId++, message, kind };
+  show(message: string, kind: Toast['kind'] = 'success', action?: ToastAction): void {
+    const toast: Toast = { id: nextId++, message, kind, action };
     this.toasts.update((list) => [...list, toast]);
-    setTimeout(() => this.dismiss(toast.id), 3200);
+    // An actionable toast sticks around long enough to actually be used.
+    setTimeout(() => this.dismiss(toast.id), action ? 7000 : 3200);
   }
 
-  success(message: string): void {
-    this.show(message, 'success');
+  success(message: string, action?: ToastAction): void {
+    this.show(message, 'success', action);
   }
 
   error(message: string): void {
@@ -28,5 +36,11 @@ export class ToastService {
 
   dismiss(id: number): void {
     this.toasts.update((list) => list.filter((t) => t.id !== id));
+  }
+
+  /** Runs a toast action and clears the toast that offered it. */
+  runAction(toast: Toast): void {
+    toast.action?.run();
+    this.dismiss(toast.id);
   }
 }

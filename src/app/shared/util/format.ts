@@ -47,6 +47,26 @@ export function roundToNext30(d: Date = new Date()): string {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
+/** "2h", "1h 30m", "23m" — never a raw 0.38333333333333336. */
+export function formatDuration(hours: number): string {
+  const totalMinutes = Math.max(0, Math.round(hours * 60));
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  if (h === 0) return `${m}m`;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+/** Clock time from an ISO timestamp, e.g. "6:12 PM". */
+export function formatClock(iso: string): string {
+  return new Date(iso).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
+}
+
+/** How long a session ran, or has been running so far. */
+export function elapsedLabel(startIso: string, endIso: string | null): string {
+  const end = endIso ? new Date(endIso).getTime() : Date.now();
+  return formatDuration((end - new Date(startIso).getTime()) / 3600000);
+}
+
 export function relativeDayLabel(dateStr: string): string {
   const today = todayStr();
   if (dateStr === today) return 'Today';

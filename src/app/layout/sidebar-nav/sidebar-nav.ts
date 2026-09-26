@@ -14,6 +14,7 @@ interface NavItem {
 
 /** Daily work first, configuration and reporting last. */
 export const NAV_ITEMS: NavItem[] = [
+  { label: 'Tables', path: '/tables', icon: 'grid', hint: 'The floor right now — book a table, start or end a session' },
   { label: 'Operations', path: '/operations', icon: 'calendar', hint: "Today's bookings and counter sales — your main workspace" },
   { label: 'Customers', path: '/customers', icon: 'users', hint: 'Customer list, spend history and outstanding balances' },
   { label: 'Inventory', path: '/inventory', icon: 'box', hint: 'Stock levels, pricing and stock movement history' },

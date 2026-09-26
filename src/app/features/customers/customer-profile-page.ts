@@ -1,4 +1,5 @@
 import { DatePipe } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { Component, computed, inject, signal } from '@angular/core';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { DataStoreService } from '../../core/services/data-store.service';
@@ -14,7 +15,7 @@ import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/uti
 
 @Component({
   selector: 'app-customer-profile-page',
-  imports: [RouterLink, DatePipe, IconComponent, BadgeComponent, EmptyStateComponent, ModalComponent, TooltipDirective],
+  imports: [FormsModule, RouterLink, DatePipe, IconComponent, BadgeComponent, EmptyStateComponent, ModalComponent, TooltipDirective],
   template: `
     @if (customer(); as c) {
       <div class="flex flex-col gap-5">
@@ -35,6 +36,10 @@ import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/uti
             </div>
           </div>
           <div class="flex flex-wrap gap-2">
+            <button type="button" class="btn btn-secondary" (click)="startEdit(c)"
+              [appTooltip]="'Fix a name or mobile number — it updates everywhere this customer appears'">
+              <app-icon name="edit" [size]="16" /> Edit details
+            </button>
             <button type="button" class="btn btn-secondary" (click)="flow.startSale(c.id)">
               <app-icon name="cart" [size]="16" /> Counter sale
             </button>
@@ -136,6 +141,28 @@ import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/uti
         </section>
       </div>
 
+      @if (editing()) {
+        <app-modal title="Edit customer" (close)="editing.set(false)">
+          <div>
+            <label class="field-label">Full name</label>
+            <input class="input" type="text" [(ngModel)]="form.name" />
+          </div>
+          <div>
+            <label class="field-label">Mobile number</label>
+            <input class="input" type="tel" inputmode="numeric" [(ngModel)]="form.mobile" />
+          </div>
+          <p class="text-xs text-muted">
+            Past bookings and bills stay linked to this customer — they simply show the corrected details.
+          </p>
+          <div modal-footer>
+            <button type="button" class="btn btn-ghost" (click)="editing.set(false)">Cancel</button>
+            <button type="button" class="btn btn-primary" [disabled]="!form.name.trim() || !form.mobile.trim()" (click)="saveEdit(c.id)">
+              Save changes
+            </button>
+          </div>
+        </app-modal>
+      }
+
       @if (confirmRemove()) {
         <app-modal title="Remove this customer?" (close)="confirmRemove.set(false)">
           <p class="text-[13px] leading-relaxed text-ink-soft">
@@ -171,6 +198,8 @@ export class CustomerProfilePage {
   private security = inject(SecurityService);
   private toast = inject(ToastService);
   confirmRemove = signal(false);
+  editing = signal(false);
+  form = { name: '', mobile: '' };
   formatCurrency = formatCurrency;
 
   id = this.route.snapshot.paramMap.get('id') ?? '';
@@ -186,6 +215,18 @@ export class CustomerProfilePage {
       .join('')
       .toUpperCase(),
   );
+
+  async startEdit(customer: { name: string; mobile: string }): Promise<void> {
+    if (!(await this.security.guard('edit this customer'))) return;
+    this.form = { name: customer.name, mobile: customer.mobile };
+    this.editing.set(true);
+  }
+
+  saveEdit(id: string): void {
+    this.store.updateCustomer(id, { name: this.form.name.trim(), mobile: this.form.mobile.trim() });
+    this.editing.set(false);
+    this.toast.success('Customer updated');
+  }
 
   async remove(id: string): Promise<void> {
     this.confirmRemove.set(false);

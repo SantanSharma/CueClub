@@ -3,6 +3,10 @@ import { Routes } from '@angular/router';
 export const routes: Routes = [
   { path: '', pathMatch: 'full', redirectTo: 'operations' },
   {
+    path: 'tables',
+    loadComponent: () => import('./features/tables/tables-page').then((m) => m.TablesPage),
+  },
+  {
     path: 'operations',
     loadComponent: () => import('./features/operations/operations-page').then((m) => m.OperationsPage),
   },

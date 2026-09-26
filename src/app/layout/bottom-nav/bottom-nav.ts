@@ -12,20 +12,20 @@ import { lockBodyScroll, unlockBodyScroll } from '../../shared/util/scroll-lock'
       class="safe-bottom fixed inset-x-0 bottom-0 z-[90] grid grid-cols-5 items-end border-t border-line bg-surface/95 px-1 pt-1.5 pb-1 backdrop-blur-lg"
     >
       <a
+        routerLink="/tables"
+        routerLinkActive="!text-primary"
+        class="flex flex-col items-center justify-end gap-0.5 py-1 text-[10px] leading-tight font-medium text-muted transition active:scale-95"
+      >
+        <app-icon name="grid" [size]="20" />
+        <span>Tables</span>
+      </a>
+      <a
         routerLink="/operations"
         routerLinkActive="!text-primary"
         class="flex flex-col items-center justify-end gap-0.5 py-1 text-[10px] leading-tight font-medium text-muted transition active:scale-95"
       >
         <app-icon name="calendar" [size]="20" />
         <span>Operations</span>
-      </a>
-      <a
-        routerLink="/customers"
-        routerLinkActive="!text-primary"
-        class="flex flex-col items-center justify-end gap-0.5 py-1 text-[10px] leading-tight font-medium text-muted transition active:scale-95"
-      >
-        <app-icon name="users" [size]="20" />
-        <span>Customers</span>
       </a>
 
       <div class="flex items-end justify-center">
@@ -40,12 +40,12 @@ import { lockBodyScroll, unlockBodyScroll } from '../../shared/util/scroll-lock'
       </div>
 
       <a
-        routerLink="/inventory"
+        routerLink="/customers"
         routerLinkActive="!text-primary"
         class="flex flex-col items-center justify-end gap-0.5 py-1 text-[10px] leading-tight font-medium text-muted transition active:scale-95"
       >
-        <app-icon name="box" [size]="20" />
-        <span>Stock</span>
+        <app-icon name="users" [size]="20" />
+        <span>Customers</span>
       </a>
       <button
         type="button"
@@ -65,6 +65,14 @@ import { lockBodyScroll, unlockBodyScroll } from '../../shared/util/scroll-lock'
           (click)="$event.stopPropagation()"
         >
           <div class="mx-auto mb-3 h-1 w-10 rounded-full bg-line"></div>
+          <a
+            routerLink="/inventory"
+            (click)="moreOpen.set(false)"
+            class="flex items-center gap-3 rounded-xl px-3 py-3.5 text-[15px] font-medium text-ink active:bg-surface-alt"
+          >
+            <app-icon name="box" [size]="19" />
+            Inventory
+          </a>
           <a
             routerLink="/analytics"
             (click)="moreOpen.set(false)"
