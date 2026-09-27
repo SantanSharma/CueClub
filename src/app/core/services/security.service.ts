@@ -73,12 +73,22 @@ export class SecurityService {
   }
 
   /**
-   * Gate for edits and deletions. Only asks while Safety Mode is on, so the
-   * calling screens never need to know the rules.
+   * Gate for edits and deletions, so the calling screens never need to know
+   * the rules.
+   *
+   * It only bites while the shop is handed over — that is who the passkey is
+   * protecting against. Once the admin has taken control back they have
+   * already entered the passkey to do so, and asking again on every delete
+   * would be noise.
    */
   guard(actionLabel: string): Promise<boolean> {
+    if (!this.store.isHandover()) return Promise.resolve(true);
     if (!this.safetyMode() || !this.hasPasskey()) return Promise.resolve(true);
-    return this.ask('Admin passkey required', `Safety Mode is on. Enter the admin passkey to ${actionLabel}.`, 'Unlock');
+    return this.ask(
+      'Admin passkey required',
+      `The shop is handed over and Safety Mode is on. Enter the admin passkey to ${actionLabel}.`,
+      'Unlock',
+    );
   }
 
   private ask(title: string, message: string, confirmLabel: string): Promise<boolean> {

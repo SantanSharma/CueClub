@@ -49,6 +49,12 @@ export interface Booking extends SoftDeletable {
   /** Primary customer's bill. Split bookings have more, linked by groupId. */
   billId: string;
   splitMode: SplitMode;
+  /**
+   * When play actually started and stopped, which is deliberately separate
+   * from the booked window above. A table booked 6–8 may only run 6:12–7:48.
+   */
+  sessionStartedAt: string | null;
+  sessionEndedAt: string | null;
   createdAt: string;
 }
 
@@ -151,6 +157,45 @@ export interface AuditEntry {
   sessionId: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Deletion batches — what makes soft delete undoable
+// ---------------------------------------------------------------------------
+
+/** Collections a deletion batch can touch. */
+export type DeletableCollection = 'bookings' | 'bills' | 'payments' | 'customers' | 'products' | 'tables' | 'expenses';
+
+export interface DeletionEntry {
+  collection: DeletableCollection;
+  id: string;
+}
+
+/**
+ * A receipt for one delete action.
+ *
+ * It lists exactly the rows that action flipped to isDel = 1, so restoring
+ * replays only those — a bill deleted by some earlier action is never dragged
+ * back up with it.
+ */
+export interface DeletionBatch {
+  id: string;
+  at: string;
+  actor: string;
+  kind: 'booking' | 'sale' | 'customer' | 'product' | 'table' | 'expense';
+  /** Human label for the recycle bin, e.g. "Rahul Verma · Table 2 · 6:00 PM". */
+  label: string;
+  /** What went with it, e.g. "1 booking · 2 bills · 3 payments". */
+  summary: string;
+  entries: DeletionEntry[];
+  /** Stock handed back when this was deleted, taken out again on restore. */
+  stockRestored: { productId: string; qty: number }[];
+  /**
+   * Set when a participant was taken off a booking. Restoring puts them back
+   * on it, not just their bill.
+   */
+  detachedFrom?: { bookingId: string; customerId: string };
+  restoredAt: string | null;
+}
+
 export interface AppConfig {
   shopName: string;
   openingTime: string;
@@ -180,9 +225,10 @@ export interface AppData {
   expenses: Expense[];
   handovers: HandoverSession[];
   auditLog: AuditEntry[];
+  deletions: DeletionBatch[];
   config: AppConfig;
 }
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 4;
 
 export const ADMIN_ACTOR = 'Admin';

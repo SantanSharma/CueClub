@@ -2,17 +2,18 @@ import { DatePipe } from '@angular/common';
 import { Component, computed, effect, inject, input, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
-import { BookingStatus } from '../../core/models/models';
+import { Booking, BookingStatus } from '../../core/models/models';
 import { DataStoreService } from '../../core/services/data-store.service';
 import { OrderFlowService } from '../../core/services/order-flow.service';
 import { SecurityService } from '../../core/services/security.service';
 import { BadgeComponent } from '../../shared/ui/badge/badge';
 import { DrawerComponent } from '../../shared/ui/drawer/drawer';
 import { IconComponent } from '../../shared/ui/icon/icon';
+import { ModalComponent } from '../../shared/ui/modal/modal';
 import { QuantityStepperComponent } from '../../shared/ui/quantity-stepper/quantity-stepper';
 import { ToastService } from '../../shared/ui/toast/toast.service';
 import { TooltipDirective } from '../../shared/ui/tooltip/tooltip.directive';
-import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/util/format';
+import { elapsedLabel, formatClock, formatCurrency, formatDuration, formatTime12, relativeDayLabel } from '../../shared/util/format';
 
 /**
  * Everything about one order — booking details, each customer's bill, their
@@ -21,7 +22,7 @@ import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/uti
  */
 @Component({
   selector: 'app-order-detail-drawer',
-  imports: [FormsModule, DatePipe, DrawerComponent, IconComponent, BadgeComponent, QuantityStepperComponent, TooltipDirective],
+  imports: [FormsModule, DatePipe, DrawerComponent, IconComponent, BadgeComponent, ModalComponent, QuantityStepperComponent, TooltipDirective],
   template: `
     @if (activeBill(); as bill) {
       <app-drawer
@@ -66,6 +67,18 @@ import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/uti
             }
 
             @if (booking(); as bk) {
+              <!-- Booked window and actual session time, kept apart -->
+              <dl class="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-xl bg-canvas px-3 py-2.5">
+                <dt class="text-[10px] font-semibold tracking-wide text-muted uppercase">Booked</dt>
+                <dd class="text-[12px] font-medium text-ink tabular-nums">
+                  {{ formatTime12(bk.startTime) }} – {{ formatTime12(bk.endTime) }} · {{ formatDuration(bk.durationHours) }}
+                </dd>
+                <dt class="text-[10px] font-semibold tracking-wide text-muted uppercase">Session</dt>
+                <dd class="text-[12px] font-medium tabular-nums" [class]="bk.status === 'ongoing' ? 'text-danger' : 'text-ink'">
+                  {{ sessionLine(bk) }}
+                </dd>
+              </dl>
+
               <div class="mt-3 flex flex-wrap gap-2">
                 @if (bk.status === 'upcoming') {
                   <button type="button" class="btn btn-primary btn-sm" (click)="setStatus('ongoing')"
@@ -88,6 +101,17 @@ import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/uti
                     <app-icon name="ban" [size]="14" /> Cancel
                   </button>
                 }
+                <button type="button" class="btn btn-ghost btn-sm text-faint hover:text-danger" (click)="confirmDelete.set(true)"
+                  [appTooltip]="'Removes the booking with its bills, items and payments — undoable'">
+                  <app-icon name="trash" [size]="14" /> Delete
+                </button>
+              </div>
+            } @else {
+              <div class="mt-3 flex flex-wrap gap-2">
+                <button type="button" class="btn btn-ghost btn-sm text-faint hover:text-danger" (click)="confirmDelete.set(true)"
+                  [appTooltip]="'Removes this sale with its items and payments — undoable'">
+                  <app-icon name="trash" [size]="14" /> Delete sale
+                </button>
               </div>
             }
           </section>
@@ -227,6 +251,37 @@ import { formatCurrency, formatTime12, relativeDayLabel } from '../../shared/uti
           </button>
         </div>
       </app-drawer>
+
+      @if (confirmDelete()) {
+        <app-modal [title]="booking() ? 'Delete this booking?' : 'Delete this sale?'" (close)="confirmDelete.set(false)">
+          <p class="text-[13px] leading-relaxed text-ink-soft">
+            This removes <strong>{{ headerTitle() }}</strong> along with everything attached to it. Nothing is erased — you can
+            put it back from Settings → Data, or with Undo straight after.
+          </p>
+
+          <ul class="flex flex-col gap-1.5 rounded-xl bg-canvas px-3.5 py-3 text-[13px] text-ink-soft">
+            <li class="flex items-center gap-2">
+              <app-icon name="receipt" [size]="14" /> {{ preview().bills }} bill(s) with their items
+            </li>
+            @if (preview().items > 0) {
+              <li class="flex items-center gap-2">
+                <app-icon name="box" [size]="14" /> {{ preview().items }} drink/snack item(s) go back into stock
+              </li>
+            }
+            @if (preview().payments > 0) {
+              <li class="flex items-center gap-2 font-semibold text-warn">
+                <app-icon name="wallet" [size]="14" />
+                {{ preview().payments }} payment(s) totalling {{ formatCurrency(preview().collected) }} come off the books
+              </li>
+            }
+          </ul>
+
+          <div modal-footer>
+            <button type="button" class="btn btn-ghost" (click)="confirmDelete.set(false)">Keep it</button>
+            <button type="button" class="btn btn-danger" (click)="remove()">Delete</button>
+          </div>
+        </app-modal>
+      }
     }
   `,
   host: { class: 'contents' },
@@ -242,6 +297,7 @@ export class OrderDetailDrawerComponent {
 
   formatCurrency = formatCurrency;
   formatTime12 = formatTime12;
+  formatDuration = formatDuration;
   relativeDayLabel = relativeDayLabel;
   Math = Math;
 
@@ -249,6 +305,43 @@ export class OrderDetailDrawerComponent {
   productQuery = signal('');
   payAmount = 0;
   selectedBillId = signal<string | null>(null);
+  confirmDelete = signal(false);
+
+  /** What the delete will take with it, for the confirm dialog. */
+  preview = computed(() => {
+    const booking = this.booking();
+    if (booking) return this.store.bookingDeletionPreview(booking.id);
+    const bills = this.bills();
+    return {
+      bills: bills.length,
+      payments: bills.flatMap((b) => this.store.billPayments(b.id)).length,
+      items: bills.reduce((n, b) => n + b.items.filter((i) => i.type === 'product').reduce((q, i) => q + i.qty, 0), 0),
+      collected: bills.reduce((s, b) => s + b.paidAmount, 0),
+    };
+  });
+
+  /**
+   * Deleting is undoable, so the toast offers it straight away — the recycle
+   * bin in Settings covers everything after that.
+   */
+  async remove(): Promise<void> {
+    this.confirmDelete.set(false);
+    const booking = this.booking();
+    const label = this.headerTitle();
+    if (!(await this.security.guard(booking ? 'delete this booking' : 'delete this sale'))) return;
+
+    const batch = booking ? this.store.removeBooking(booking.id) : this.store.removeSaleGroup(this.sourceBill()!.groupId);
+    this.flow.closeDetail();
+
+    if (!batch) return;
+    this.toast.show(`${label} deleted`, 'info', {
+      label: 'Undo',
+      run: () => {
+        this.store.restoreDeletion(batch.id);
+        this.toast.success(`${label} restored`);
+      },
+    });
+  }
 
   constructor() {
     // Follow the bill the caller opened; split orders then switch by tab.
@@ -342,13 +435,25 @@ export class OrderDetailDrawerComponent {
     this.toast.success('Bill settled');
   }
 
+  /** Session times are stamped by the store, so every entry point agrees. */
   async setStatus(status: BookingStatus): Promise<void> {
     const booking = this.booking();
     if (!booking) return;
     if (status === 'cancelled' && !(await this.security.guard('cancel this booking'))) return;
-    this.store.updateBookingStatus(booking.id, status);
-    const labels: Record<string, string> = { ongoing: 'Session started', completed: 'Booking completed', cancelled: 'Booking cancelled' };
+
+    if (status === 'ongoing') this.store.startSession(booking.id);
+    else if (status === 'completed') this.store.endSession(booking.id);
+    else this.store.updateBookingStatus(booking.id, status);
+
+    const labels: Record<string, string> = { ongoing: 'Session started', completed: 'Session ended', cancelled: 'Booking cancelled' };
     this.toast.success(labels[status] ?? 'Booking updated');
+  }
+
+  sessionLine(booking: Booking): string {
+    if (!booking.sessionStartedAt) return 'Not started yet';
+    const started = formatClock(booking.sessionStartedAt);
+    if (!booking.sessionEndedAt) return `Started ${started} · running ${elapsedLabel(booking.sessionStartedAt, null)}`;
+    return `${started} – ${formatClock(booking.sessionEndedAt)} · ${elapsedLabel(booking.sessionStartedAt, booking.sessionEndedAt)}`;
   }
 
   async edit(): Promise<void> {

@@ -58,6 +58,7 @@ export function buildEmptyData(): AppData {
     expenses: [],
     handovers: [],
     auditLog: [],
+    deletions: [],
     config: defaultConfig('My Pool Club'),
   };
 }
@@ -164,6 +165,9 @@ export function buildSeedData(): AppData {
       status,
       billId,
       splitMode: 'equal',
+      // Play starts a few minutes after the booked slot and can end early.
+      sessionStartedAt: status === 'ongoing' || status === 'completed' ? addMinutes(start, 6).toISOString() : null,
+      sessionEndedAt: status === 'completed' ? addMinutes(end, -9).toISOString() : null,
       createdAt: start.toISOString(),
       isDel: 0,
     });
@@ -244,6 +248,7 @@ export function buildSeedData(): AppData {
     expenses,
     handovers: [],
     auditLog: [],
+    deletions: [],
     config: defaultConfig(),
   };
 }

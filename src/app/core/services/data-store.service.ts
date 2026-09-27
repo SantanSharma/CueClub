@@ -1,4 +1,5 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
+import { formatTime12 } from '../../shared/util/format';
 import { StorageService, uid } from './storage.service';
 import { buildEmptyData, buildSeedData, defaultConfig } from './seed';
 import {
@@ -12,6 +13,9 @@ import {
   Booking,
   BookingStatus,
   Customer,
+  DeletableCollection,
+  DeletionBatch,
+  DeletionEntry,
   Expense,
   HandoverSession,
   Payment,
@@ -34,6 +38,35 @@ function nowIso(): string {
 function timeToMinutes(t: string): number {
   const [h, m] = t.split(':').map(Number);
   return h * 60 + m;
+}
+
+/** Minutes-into-the-day for a session stamp, but only if it lands on `date`. */
+function sessionMinutesOn(iso: string | null, date: string): number | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  const onDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  if (onDate !== date) return null;
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+/**
+ * How long a booking really ties up its table.
+ *
+ * The booked window is only the plan. Once play actually happens the session
+ * decides: a session that finished early frees the table there and then, and a
+ * session that started early occupies it from then. A session still running
+ * holds the table for its booked window — a later booking is still allowed to
+ * exist, it simply starts late when the table frees up.
+ */
+function occupancyWindow(b: Booking): { start: number; end: number } {
+  const bookedStart = timeToMinutes(b.startTime);
+  const bookedEnd = timeToMinutes(b.endTime);
+  const startedAt = sessionMinutesOn(b.sessionStartedAt, b.date);
+  const endedAt = sessionMinutesOn(b.sessionEndedAt, b.date);
+
+  const start = startedAt !== null ? Math.min(bookedStart, startedAt) : bookedStart;
+  const end = endedAt !== null ? Math.max(start, endedAt) : bookedEnd;
+  return { start, end };
 }
 
 function billStatusFor(total: number, paid: number): 'unpaid' | 'partial' | 'paid' {
@@ -187,6 +220,7 @@ export class DataStoreService {
     mutator(draft);
 
     if (audit) {
+      draft.auditLog ??= [];
       const session = draft.config.activeHandoverId;
       const actor = session ? (draft.handovers.find((h) => h.id === session)?.personName ?? ADMIN_ACTOR) : ADMIN_ACTOR;
       draft.auditLog.push({
@@ -235,6 +269,135 @@ export class DataStoreService {
     return row;
   }
 
+  // ---------- deletion batches ----------
+  readonly deletions = computed(() => [...this.data().deletions].sort((a, b) => b.at.localeCompare(a.at)));
+  readonly restorableDeletions = computed(() => this.deletions().filter((b) => !b.restoredAt));
+
+  /**
+   * Flips the given rows to deleted and files a receipt so the action can be
+   * undone later. Only rows that are currently active are recorded, so undo
+   * never resurrects something a previous delete had already taken out.
+   */
+  private deleteBatch(
+    d: AppData,
+    kind: DeletionBatch['kind'],
+    label: string,
+    picks: { collection: DeletableCollection; ids: string[] }[],
+    stockRestored: { productId: string; qty: number }[] = [],
+  ): DeletionBatch {
+    const entries: DeletionEntry[] = [];
+    d.deletions ??= [];
+
+    for (const pick of picks) {
+      const list = d[pick.collection] as unknown as (SoftDeletable & { id: string })[];
+      for (const id of pick.ids) {
+        const row = list.find((x) => x.id === id);
+        if (!row || row.isDel === 1) continue;
+        row.isDel = 1;
+        entries.push({ collection: pick.collection, id });
+      }
+    }
+
+    // Items that were never really consumed go back on the shelf.
+    for (const { productId, qty } of stockRestored) {
+      const product = d.products.find((p) => p.id === productId);
+      if (!product || qty <= 0) continue;
+      product.stock += qty;
+      product.updatedAt = nowIso();
+      d.stockMovements.push({
+        id: uid(),
+        productId,
+        type: 'adjust',
+        qty,
+        note: 'Returned — booking removed',
+        date: nowIso(),
+        isDel: 0,
+      });
+    }
+
+    const counts = new Map<DeletableCollection, number>();
+    for (const e of entries) counts.set(e.collection, (counts.get(e.collection) ?? 0) + 1);
+    const summary =
+      [...counts.entries()].map(([c, n]) => `${n} ${n === 1 ? c.replace(/s$/, '') : c}`).join(' · ') || 'nothing';
+
+    const batch: DeletionBatch = {
+      id: uid(),
+      at: nowIso(),
+      actor: d.config.activeHandoverId
+        ? (d.handovers.find((h) => h.id === d.config.activeHandoverId)?.personName ?? ADMIN_ACTOR)
+        : ADMIN_ACTOR,
+      kind,
+      label,
+      summary,
+      entries,
+      stockRestored,
+      restoredAt: null,
+    };
+    d.deletions.push(batch);
+    if (d.deletions.length > 50) d.deletions = d.deletions.slice(-50);
+    return batch;
+  }
+
+  /** Puts back exactly what one delete action took out. */
+  restoreDeletion(batchId: string): void {
+    const batch = this.deletions().find((b) => b.id === batchId);
+    this.commit(
+      (d) => {
+        const target = d.deletions.find((b) => b.id === batchId);
+        if (!target || target.restoredAt) return;
+
+        for (const entry of target.entries) {
+          const list = d[entry.collection] as unknown as (SoftDeletable & { id: string })[];
+          const row = list.find((x) => x.id === entry.id);
+          if (row) row.isDel = 0;
+        }
+
+        // Someone taken off a booking goes back onto it, not just their bill.
+        if (target.detachedFrom) {
+          const booking = d.bookings.find((b) => b.id === target.detachedFrom!.bookingId);
+          if (booking && !booking.customerIds.includes(target.detachedFrom.customerId)) {
+            booking.customerIds.push(target.detachedFrom.customerId);
+          }
+        }
+
+        // Stock handed back on delete is taken out again.
+        for (const { productId, qty } of target.stockRestored) {
+          const product = d.products.find((p) => p.id === productId);
+          if (!product || qty <= 0) continue;
+          product.stock -= qty;
+          product.updatedAt = nowIso();
+          d.stockMovements.push({
+            id: uid(),
+            productId,
+            type: 'adjust',
+            qty: -qty,
+            note: 'Taken again — booking restored',
+            date: nowIso(),
+            isDel: 0,
+          });
+        }
+
+        target.restoredAt = nowIso();
+      },
+      { action: 'update', entity: 'deletion', entityId: batchId, summary: `Restored ${batch?.label ?? 'deleted record'}` },
+    );
+  }
+
+  /**
+   * A restored booking may land on a slot someone has taken in the meantime —
+   * worth warning about, but not worth blocking the restore over.
+   */
+  restoreClash(batch: DeletionBatch): string | null {
+    if (batch.kind !== 'booking' || batch.restoredAt) return null;
+    const entry = batch.entries.find((e) => e.collection === 'bookings');
+    const booking = entry ? this.data().bookings.find((b) => b.id === entry.id) : undefined;
+    if (!booking) return null;
+    const clash = this.hasConflict(booking.tableId, booking.date, booking.startTime, booking.endTime, booking.id);
+    if (!clash) return null;
+    const { start, end } = this.occupancyLabel(clash);
+    return `${this.tables().find((t) => t.id === booking.tableId)?.name ?? 'That table'} is now in use ${start}–${end}`;
+  }
+
   // ---------- tables ----------
   tableStatus(tableId: string): TableStatus {
     const table = this.tables().find((t) => t.id === tableId);
@@ -278,14 +441,16 @@ export class DataStoreService {
     );
   }
 
-  removeTable(id: string): void {
+  removeTable(id: string): DeletionBatch | undefined {
     const name = this.tables().find((t) => t.id === id)?.name ?? 'table';
+    let batch: DeletionBatch | undefined;
     this.commit(
       (d) => {
-        this.markDeleted(d.tables, id);
+        batch = this.deleteBatch(d, 'table', name, [{ collection: 'tables', ids: [id] }]);
       },
       { action: 'delete', entity: 'table', entityId: id, summary: `Removed ${name}` },
     );
+    return batch;
   }
 
   // ---------- customers ----------
@@ -311,14 +476,16 @@ export class DataStoreService {
     );
   }
 
-  removeCustomer(id: string): void {
+  removeCustomer(id: string): DeletionBatch | undefined {
     const name = this.customers().find((c) => c.id === id)?.name ?? 'customer';
+    let batch: DeletionBatch | undefined;
     this.commit(
       (d) => {
-        this.markDeleted(d.customers, id);
+        batch = this.deleteBatch(d, 'customer', name, [{ collection: 'customers', ids: [id] }]);
       },
       { action: 'delete', entity: 'customer', entityId: id, summary: `Removed ${name}` },
     );
+    return batch;
   }
 
   customerBills(customerId: string): Bill[] {
@@ -342,6 +509,11 @@ export class DataStoreService {
   }
 
   // ---------- bookings ----------
+  /**
+   * Clashes are judged on real occupancy, not the booked window — see
+   * occupancyWindow. A booking whose session already ended no longer blocks
+   * the rest of its slot.
+   */
   hasConflict(tableId: string, date: string, startTime: string, endTime: string, excludeBookingId?: string): Booking | undefined {
     const s = timeToMinutes(startTime);
     const e = timeToMinutes(endTime);
@@ -349,10 +521,16 @@ export class DataStoreService {
       if (b.id === excludeBookingId) return false;
       if (b.tableId !== tableId || b.date !== date) return false;
       if (b.status === 'cancelled') return false;
-      const bs = timeToMinutes(b.startTime);
-      const be = timeToMinutes(b.endTime);
-      return s < be && e > bs;
+      const { start, end } = occupancyWindow(b);
+      return s < end && e > start;
     });
+  }
+
+  /** The window a clashing booking actually holds, for showing in the UI. */
+  occupancyLabel(b: Booking): { start: string; end: string } {
+    const { start, end } = occupancyWindow(b);
+    const asTime = (mins: number) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+    return { start: asTime(start), end: asTime(end) };
   }
 
   /**
@@ -379,10 +557,9 @@ export class DataStoreService {
     const bookingId = uid();
     const customerIds = params.customerIds.filter(Boolean);
     const splitMode: SplitMode = params.splitMode ?? 'equal';
-    const status: BookingStatus =
-      params.date === this.today() && timeToMinutes(params.startTime) <= new Date().getHours() * 60 + new Date().getMinutes()
-        ? 'ongoing'
-        : 'upcoming';
+    // A new booking is always just booked — it only becomes "ongoing" when the
+    // operator actually starts the session, which is what stamps the time.
+    const status: BookingStatus = 'upcoming';
 
     const shares = allocateShares(params.finalPrice, customerIds, splitMode, params.shares, params.payerId);
     const bills: Bill[] = customerIds.map((customerId) => {
@@ -432,6 +609,8 @@ export class DataStoreService {
       status,
       billId: bills[0].id,
       splitMode,
+      sessionStartedAt: null,
+      sessionEndedAt: null,
       createdAt: nowIso(),
       isDel: 0,
     };
@@ -453,6 +632,175 @@ export class DataStoreService {
       },
     );
     return booking;
+  }
+
+  /**
+   * Starts play on a booking. The session clock is stamped here, separately
+   * from the booked window, so "booked 6–8, played 6:12–7:48" is recorded.
+   */
+  startSession(bookingId: string): void {
+    const customer = this.customers().find((c) => c.id === this.bookingById(bookingId)?.customerId)?.name ?? 'customer';
+    this.commit(
+      (d) => {
+        const b = d.bookings.find((x) => x.id === bookingId);
+        if (!b || b.status === 'cancelled') return;
+        b.status = 'ongoing';
+        b.sessionStartedAt = b.sessionStartedAt ?? nowIso();
+        b.sessionEndedAt = null;
+      },
+      { action: 'update', entity: 'booking', entityId: bookingId, summary: `Session started for ${customer}` },
+    );
+  }
+
+  /** Ends play and frees the table. The bill stays open until it is settled. */
+  endSession(bookingId: string): void {
+    const customer = this.customers().find((c) => c.id === this.bookingById(bookingId)?.customerId)?.name ?? 'customer';
+    this.commit(
+      (d) => {
+        const b = d.bookings.find((x) => x.id === bookingId);
+        if (!b || b.status === 'cancelled') return;
+        b.status = 'completed';
+        b.sessionStartedAt = b.sessionStartedAt ?? nowIso();
+        b.sessionEndedAt = nowIso();
+      },
+      { action: 'update', entity: 'booking', entityId: bookingId, summary: `Session ended for ${customer}` },
+    );
+  }
+
+  /**
+   * Lets the operator correct the session clock by hand — someone forgets to
+   * press Start, or ends a session late. Status follows the stamps so the
+   * floor view never disagrees with the times shown on it.
+   */
+  updateSessionTimes(bookingId: string, startedAt: string | null, endedAt: string | null): void {
+    this.commit(
+      (d) => {
+        const b = d.bookings.find((x) => x.id === bookingId);
+        if (!b || b.status === 'cancelled') return;
+        b.sessionStartedAt = startedAt;
+        b.sessionEndedAt = startedAt ? endedAt : null;
+        if (!startedAt) b.status = 'upcoming';
+        else b.status = b.sessionEndedAt ? 'completed' : 'ongoing';
+      },
+      { action: 'update', entity: 'booking', entityId: bookingId, summary: 'Session times adjusted' },
+    );
+  }
+
+  /**
+   * Puts another person on an existing booking. They start with no table
+   * share — the operator decides how to split it, so nobody else's bill (or
+   * what they have already paid) moves without being asked.
+   */
+  addBookingCustomer(bookingId: string, customerId: string): void {
+    const name = this.customers().find((c) => c.id === customerId)?.name ?? 'customer';
+    this.commit(
+      (d) => {
+        const booking = d.bookings.find((b) => b.id === bookingId);
+        if (!booking || booking.customerIds.includes(customerId)) return;
+        booking.customerIds.push(customerId);
+        d.bills.push({
+          id: uid(),
+          customerId,
+          bookingId,
+          groupId: bookingId,
+          items: [],
+          total: 0,
+          paidAmount: 0,
+          status: billStatusFor(0, 0),
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+          isDel: 0,
+        });
+      },
+      { action: 'update', entity: 'booking', entityId: bookingId, summary: `Added ${name} to the booking` },
+    );
+  }
+
+  /**
+   * Takes someone off a booking along with their bill, items and payments, as
+   * one undoable action. Restoring puts them back on the booking too.
+   */
+  removeBookingCustomer(bookingId: string, customerId: string): DeletionBatch | undefined {
+    const booking = this.bookingById(bookingId);
+    if (!booking || booking.customerIds.length <= 1) return undefined;
+
+    const name = this.customers().find((c) => c.id === customerId)?.name ?? 'customer';
+    const bills = this.bills().filter((b) => b.bookingId === bookingId && b.customerId === customerId);
+    const payments = bills.flatMap((b) => this.billPayments(b.id));
+
+    const stock = new Map<string, number>();
+    for (const bill of bills) {
+      for (const item of bill.items) {
+        if (item.type !== 'product') continue;
+        stock.set(item.refId, (stock.get(item.refId) ?? 0) + item.qty);
+      }
+    }
+
+    let batch: DeletionBatch | undefined;
+    this.commit(
+      (d) => {
+        batch = this.deleteBatch(
+          d,
+          'booking',
+          `${name} · removed from booking`,
+          [
+            { collection: 'bills', ids: bills.map((b) => b.id) },
+            { collection: 'payments', ids: payments.map((p) => p.id) },
+          ],
+          [...stock.entries()].map(([productId, qty]) => ({ productId, qty })),
+        );
+        batch.detachedFrom = { bookingId, customerId };
+
+        const target = d.bookings.find((b) => b.id === bookingId);
+        if (!target) return;
+        target.customerIds = target.customerIds.filter((id) => id !== customerId);
+        if (target.customerId === customerId) target.customerId = target.customerIds[0];
+        if (bills.some((b) => b.id === target.billId)) {
+          const remaining = d.bills.find((b) => b.bookingId === bookingId && b.isDel === 0);
+          if (remaining) target.billId = remaining.id;
+        }
+      },
+      { action: 'delete', entity: 'booking', entityId: bookingId, summary: `Removed ${name} from the booking` },
+    );
+    return batch;
+  }
+
+  /**
+   * Writes an explicit table-charge split onto the participants' bills, used
+   * when the operator changes who is on a booking or how it is shared.
+   */
+  applyBookingShares(bookingId: string, shares: Record<string, number>): void {
+    this.commit(
+      (d) => {
+        const booking = d.bookings.find((b) => b.id === bookingId);
+        if (!booking) return;
+        const table = d.tables.find((t) => t.id === booking.tableId);
+
+        for (const bill of d.bills.filter((b) => b.bookingId === bookingId && b.isDel === 0)) {
+          const amount = Math.max(0, Math.round(shares[bill.customerId] ?? 0));
+          const line = bill.items.find((i) => i.type === 'booking');
+          if (line) {
+            line.unitPrice = amount;
+            line.amount = amount;
+            if (amount === 0) bill.items = bill.items.filter((i) => i.type !== 'booking');
+          } else if (amount > 0) {
+            bill.items.unshift({
+              id: uid(),
+              type: 'booking',
+              refId: booking.id,
+              name: `${table?.name ?? 'Table'} booking (${booking.durationHours}h)`,
+              qty: 1,
+              unitPrice: amount,
+              amount,
+            });
+          }
+          bill.total = bill.items.reduce((s, i) => s + i.amount, 0);
+          bill.status = billStatusFor(bill.total, bill.paidAmount);
+          bill.updatedAt = nowIso();
+        }
+      },
+      { action: 'update', entity: 'booking', entityId: bookingId, summary: 'Table charge re-split' },
+    );
   }
 
   updateBookingStatus(bookingId: string, status: BookingStatus): void {
@@ -490,14 +838,93 @@ export class DataStoreService {
     return this.bookings().find((b) => b.id === id);
   }
 
-  removeBooking(bookingId: string): void {
+  /** What a booking takes with it — shown in the confirm dialog. */
+  bookingDeletionPreview(bookingId: string): { bills: number; payments: number; items: number; collected: number } {
+    const bills = this.bills().filter((b) => b.bookingId === bookingId);
+    const payments = bills.flatMap((b) => this.billPayments(b.id));
+    return {
+      bills: bills.length,
+      payments: payments.length,
+      items: bills.reduce((n, b) => n + b.items.filter((i) => i.type === 'product').reduce((q, i) => q + i.qty, 0), 0),
+      collected: bills.reduce((s, b) => s + b.paidAmount, 0),
+    };
+  }
+
+  /**
+   * Removes a booking with everything hanging off it — bills, their counter-sale
+   * items and the payments taken against them — as one undoable action. Works
+   * whether the booking is upcoming, running or finished.
+   */
+  removeBooking(bookingId: string): DeletionBatch | undefined {
+    const booking = this.bookingById(bookingId);
+    if (!booking) return undefined;
+
+    const bills = this.bills().filter((b) => b.bookingId === bookingId);
+    const payments = bills.flatMap((b) => this.billPayments(b.id));
+    const table = this.tables().find((t) => t.id === booking.tableId)?.name ?? 'Table';
+    const customer = this.customers().find((c) => c.id === booking.customerId)?.name ?? 'Customer';
+
+    // Drinks and snacks on a removed booking were never really sold.
+    const stock = new Map<string, number>();
+    for (const bill of bills) {
+      for (const item of bill.items) {
+        if (item.type !== 'product') continue;
+        stock.set(item.refId, (stock.get(item.refId) ?? 0) + item.qty);
+      }
+    }
+
+    let batch: DeletionBatch | undefined;
     this.commit(
       (d) => {
-        this.markDeleted(d.bookings, bookingId);
-        for (const bill of d.bills.filter((b) => b.bookingId === bookingId)) bill.isDel = 1;
+        batch = this.deleteBatch(
+          d,
+          'booking',
+          `${customer} · ${table} · ${formatTime12(booking.startTime)}`,
+          [
+            { collection: 'bookings', ids: [bookingId] },
+            { collection: 'bills', ids: bills.map((b) => b.id) },
+            { collection: 'payments', ids: payments.map((p) => p.id) },
+          ],
+          [...stock.entries()].map(([productId, qty]) => ({ productId, qty })),
+        );
       },
-      { action: 'delete', entity: 'booking', entityId: bookingId, summary: 'Booking removed' },
+      { action: 'delete', entity: 'booking', entityId: bookingId, summary: `Removed booking for ${customer} on ${table}` },
     );
+    return batch;
+  }
+
+  /** A counter sale and its payments, removed as one undoable action. */
+  removeSaleGroup(groupId: string): DeletionBatch | undefined {
+    const bills = this.billsInGroup(groupId).filter((b) => !b.bookingId);
+    if (bills.length === 0) return undefined;
+    const payments = bills.flatMap((b) => this.billPayments(b.id));
+    const customer = this.customers().find((c) => c.id === bills[0].customerId)?.name ?? 'Customer';
+
+    const stock = new Map<string, number>();
+    for (const bill of bills) {
+      for (const item of bill.items) {
+        if (item.type !== 'product') continue;
+        stock.set(item.refId, (stock.get(item.refId) ?? 0) + item.qty);
+      }
+    }
+
+    let batch: DeletionBatch | undefined;
+    this.commit(
+      (d) => {
+        batch = this.deleteBatch(
+          d,
+          'sale',
+          `${customer} · counter sale`,
+          [
+            { collection: 'bills', ids: bills.map((b) => b.id) },
+            { collection: 'payments', ids: payments.map((p) => p.id) },
+          ],
+          [...stock.entries()].map(([productId, qty]) => ({ productId, qty })),
+        );
+      },
+      { action: 'delete', entity: 'sale', entityId: groupId, summary: `Removed counter sale for ${customer}` },
+    );
+    return batch;
   }
 
   /** Move a booking to another table, keeping its bill line items in sync. */
@@ -704,14 +1131,16 @@ export class DataStoreService {
     );
   }
 
-  removeProduct(id: string): void {
+  removeProduct(id: string): DeletionBatch | undefined {
     const name = this.productById(id)?.name ?? 'item';
+    let batch: DeletionBatch | undefined;
     this.commit(
       (d) => {
-        this.markDeleted(d.products, id);
+        batch = this.deleteBatch(d, 'product', name, [{ collection: 'products', ids: [id] }]);
       },
       { action: 'delete', entity: 'product', entityId: id, summary: `Removed ${name}` },
     );
+    return batch;
   }
 
   adjustStock(id: string, delta: number, type: StockMovement['type'], note: string): void {
@@ -758,14 +1187,16 @@ export class DataStoreService {
     );
   }
 
-  removeExpense(id: string): void {
+  removeExpense(id: string): DeletionBatch | undefined {
     const name = this.expenses().find((e) => e.id === id)?.name ?? 'expense';
+    let batch: DeletionBatch | undefined;
     this.commit(
       (d) => {
-        this.markDeleted(d.expenses, id);
+        batch = this.deleteBatch(d, 'expense', name, [{ collection: 'expenses', ids: [id] }]);
       },
       { action: 'delete', entity: 'expense', entityId: id, summary: `Removed expense ${name}` },
     );
+    return batch;
   }
 
   // ---------- config ----------
@@ -943,12 +1374,15 @@ function reallocateBookingCharge(d: AppData, booking: Booking, newTotal: number)
 }
 
 /**
- * Brings data saved by an earlier version up to the current shape. Runs on every
- * load so existing installs keep their bookings, bills and stock.
+ * Brings saved data up to the current shape. Runs on every load so existing
+ * installs keep their bookings, bills and stock.
+ *
+ * Every step is idempotent and runs unconditionally rather than being skipped
+ * when the stored version already matches. A build that stamps a new version
+ * before it writes a newly added collection would otherwise leave that
+ * collection missing forever, and the next write to it would throw.
  */
 function migrate(raw: AppData): AppData {
-  if (raw.schemaVersion === SCHEMA_VERSION) return raw;
-
   const d = structuredClone(raw);
   const withFlag = <T extends object>(row: T): T & SoftDeletable => ({
     ...(row as T & SoftDeletable),
@@ -965,6 +1399,11 @@ function migrate(raw: AppData): AppData {
     ...withFlag(b),
     customerIds: b.customerIds?.length ? b.customerIds : [b.customerId],
     splitMode: b.splitMode ?? 'equal',
+    // Older bookings have no session times. An already-running or finished
+    // booking is assumed to have started when it was booked to start.
+    sessionStartedAt:
+      b.sessionStartedAt ?? (b.status === 'ongoing' || b.status === 'completed' ? b.createdAt : null),
+    sessionEndedAt: b.sessionEndedAt ?? null,
   }));
 
   d.bills = (d.bills ?? []).map((b) => ({
@@ -976,6 +1415,7 @@ function migrate(raw: AppData): AppData {
 
   d.handovers = d.handovers ?? [];
   d.auditLog = d.auditLog ?? [];
+  d.deletions = d.deletions ?? [];
   d.config = { ...defaultConfig(d.config?.shopName), ...d.config };
   d.schemaVersion = SCHEMA_VERSION;
   return d;

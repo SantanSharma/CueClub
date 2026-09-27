@@ -1,11 +1,12 @@
 import { Component, computed, effect, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
-import { SplitMode } from '../../core/models/models';
+import { Booking, SplitMode } from '../../core/models/models';
 import { DataStoreService, allocateShares } from '../../core/services/data-store.service';
 import { OrderFlowService } from '../../core/services/order-flow.service';
 import { DrawerComponent } from '../../shared/ui/drawer/drawer';
 import { IconComponent } from '../../shared/ui/icon/icon';
+import { ModalComponent } from '../../shared/ui/modal/modal';
 import { QuantityStepperComponent } from '../../shared/ui/quantity-stepper/quantity-stepper';
 import { ToastService } from '../../shared/ui/toast/toast.service';
 import { TooltipDirective } from '../../shared/ui/tooltip/tooltip.directive';
@@ -13,6 +14,7 @@ import {
   addDays,
   addMinutesToTime,
   formatCurrency,
+  formatDuration,
   formatTime12,
   relativeDayLabel,
   roundToNext30,
@@ -23,6 +25,26 @@ import {
 type Section = 'customer' | 'what' | 'when' | 'split' | 'items' | 'pay';
 const DURATIONS = [0.5, 1, 1.5, 2, 3];
 
+/** Current clock time as HH:mm, for stamping the session by hand. */
+function clockNow(): string {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** HH:mm on a yyyy-MM-dd date, back to an ISO timestamp. */
+function toIso(date: string, time: string): string {
+  const [y, m, d] = date.split('-').map(Number);
+  const [hh, mm] = time.split(':').map(Number);
+  return new Date(y, m - 1, d, hh, mm).toISOString();
+}
+
+/** ISO timestamp down to HH:mm for the time inputs. */
+function toClock(iso: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
 /**
  * The one creation flow: customers (with inline create) → booking or counter
  * sale → table & time → how the charge is split → items → payment.
@@ -32,7 +54,7 @@ const DURATIONS = [0.5, 1, 1.5, 2, 3];
  */
 @Component({
   selector: 'app-order-drawer',
-  imports: [FormsModule, DrawerComponent, IconComponent, QuantityStepperComponent, TooltipDirective],
+  imports: [FormsModule, DrawerComponent, IconComponent, ModalComponent, QuantityStepperComponent, TooltipDirective],
   template: `
     <app-drawer
       [title]="isEdit() ? 'Edit booking' : mode() === 'booking' ? 'New booking' : 'New counter sale'"
@@ -54,12 +76,10 @@ const DURATIONS = [0.5, 1, 1.5, 2, 3];
               </span>
               <span class="block truncate text-xs text-muted">{{ customerSummary() }}</span>
             </span>
-            @if (!isEdit()) {
-              <app-icon [name]="open() === 'customer' ? 'chevron-down' : 'chevron-right'" [size]="16" />
-            }
+            <app-icon [name]="open() === 'customer' ? 'chevron-down' : 'chevron-right'" [size]="16" />
           </button>
 
-          @if (open() === 'customer' && !isEdit()) {
+          @if (open() === 'customer') {
             <div class="animate-fade-up border-t border-line px-4 py-4">
               @if (customers().length) {
                 <div class="mb-3 flex flex-wrap gap-2">
@@ -215,7 +235,7 @@ const DURATIONS = [0.5, 1, 1.5, 2, 3];
                         <span class="block text-[14px] font-semibold text-ink">{{ t.name }}</span>
                         <span class="block text-[11px] text-muted">{{ formatCurrency(t.hourlyRate) }}/hr</span>
                         @if (t.busy) {
-                          <span class="mt-1 block text-[11px] font-medium text-danger">Booked {{ t.busyLabel }}</span>
+                          <span class="mt-1 block text-[11px] font-medium text-danger">In use {{ t.busyLabel }}</span>
                         } @else {
                           <span class="mt-1 block text-[11px] font-medium text-success">Free</span>
                         }
@@ -243,8 +263,45 @@ const DURATIONS = [0.5, 1, 1.5, 2, 3];
                 @if (conflict()) {
                   <p class="flex items-start gap-2 rounded-xl bg-danger-soft px-3 py-2.5 text-[13px] font-medium text-danger">
                     <app-icon name="alert" [size]="15" />
-                    {{ tableName() }} is already booked {{ conflict() }}. Pick another table or a different time.
+                    {{ tableName() }} is in use {{ conflict() }}. Pick another table or a different time.
                   </p>
+                }
+
+                @if (isEdit()) {
+                  <!-- Session clock, editable — booked window above stays as planned -->
+                  <div class="rounded-xl border border-line bg-canvas p-3">
+                    <div class="mb-2 flex items-center gap-2">
+                      <span class="field-label mb-0">Session (actual play)</span>
+                      <span class="ml-auto text-faint"
+                        [appTooltip]="'When play really started and stopped. Correct it here if Start or End was pressed late.'">
+                        <app-icon name="help" [size]="14" />
+                      </span>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3">
+                      <div>
+                        <span class="field-label">Started</span>
+                        <input class="input" type="time" [ngModel]="sessionStart()" (ngModelChange)="sessionStart.set($event)" />
+                      </div>
+                      <div>
+                        <span class="field-label">Ended</span>
+                        <input class="input" type="time" [disabled]="!sessionStart()" [ngModel]="sessionEnd()" (ngModelChange)="sessionEnd.set($event)" />
+                      </div>
+                    </div>
+                    <div class="mt-2 flex flex-wrap items-center gap-2">
+                      <button type="button" class="chip" (click)="stampSessionStart()">Start = now</button>
+                      <button type="button" class="chip" [disabled]="!sessionStart()" (click)="stampSessionEnd()">End = now</button>
+                      @if (sessionStart()) {
+                        <button type="button" class="chip" (click)="clearSession()">Clear</button>
+                      }
+                    </div>
+                    @if (sessionInvalid()) {
+                      <p class="mt-2 flex items-center gap-1.5 text-xs font-medium text-danger">
+                        <app-icon name="alert" [size]="13" /> Session must end after it starts.
+                      </p>
+                    } @else {
+                      <p class="mt-2 text-xs text-muted">{{ sessionHint() }}</p>
+                    }
+                  </div>
                 }
 
                 <div>
@@ -348,6 +405,144 @@ const DURATIONS = [0.5, 1, 1.5, 2, 3];
               </div>
             }
           </section>
+        }
+
+        <!-- Items on an existing booking — edited straight onto the bill --->
+        @if (isEdit()) {
+          <section class="card overflow-hidden">
+            <button type="button" class="flex w-full items-center gap-3 px-4 py-3.5 text-left" (click)="toggle('items')">
+              <span class="flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold"
+                [class]="editItemCount() ? 'bg-success-soft text-success' : 'bg-surface-alt text-muted'">
+                @if (editItemCount()) { <app-icon name="check" [size]="14" /> } @else { {{ stepNo('items') }} }
+              </span>
+              <span class="min-w-0 flex-1">
+                <span class="block text-[13px] font-semibold text-ink">Drinks, snacks &amp; more</span>
+                <span class="block truncate text-xs text-muted">
+                  {{ editItemCount() ? editItemCount() + ' item(s) on this bill' : 'Add items — they go straight onto the bill' }}
+                </span>
+              </span>
+              <app-icon [name]="open() === 'items' ? 'chevron-down' : 'chevron-right'" [size]="16" />
+            </button>
+
+            @if (open() === 'items') {
+              <div class="animate-fade-up border-t border-line px-4 py-4">
+                @if (editBills().length > 1) {
+                  <div class="mb-3">
+                    <span class="field-label">Whose bill</span>
+                    <div class="flex flex-wrap gap-2">
+                      @for (b of editBills(); track b.id) {
+                        <button
+                          type="button"
+                          class="chip max-w-full"
+                          [class.chip-active]="editBillId() === b.id"
+                          (click)="editBillId.set(b.id)"
+                        >
+                          <span class="min-w-0 truncate">{{ customerName(b.customerId) }}</span>
+                          <span class="pill shrink-0 bg-surface/30 px-1.5 py-0 text-[11px]">{{ formatCurrency(b.total) }}</span>
+                        </button>
+                      }
+                    </div>
+                  </div>
+                }
+
+                @if (activeEditBill(); as bill) {
+                  @if (bill.items.length) {
+                    <div class="mb-3 flex flex-col divide-y divide-line-soft rounded-xl border border-line px-3">
+                      @for (item of bill.items; track item.id) {
+                        <div class="flex items-center gap-3 py-2.5">
+                          <span class="min-w-0 flex-1">
+                            <span class="block truncate text-[13px] font-medium text-ink">{{ item.name }}</span>
+                            <span class="block text-[11px] text-muted">{{ formatCurrency(item.unitPrice) }} each</span>
+                          </span>
+                          @if (item.type === 'product') {
+                            <app-quantity-stepper
+                              [value]="item.qty"
+                              [min]="0"
+                              [max]="stockCeiling(item.refId, item.qty)"
+                              (valueChange)="store.setBillItemQty(bill.id, item.id, $event)"
+                            />
+                          } @else {
+                            <span class="text-[11px] text-muted">Table charge</span>
+                          }
+                          <span class="w-16 text-right text-[13px] font-semibold tabular-nums">{{ formatCurrency(item.amount) }}</span>
+                        </div>
+                      }
+                    </div>
+                  }
+
+                  <div class="relative mb-2">
+                    <span class="absolute top-1/2 left-3 -translate-y-1/2 text-faint"><app-icon name="search" [size]="16" /></span>
+                    <input class="input pl-9" type="text" placeholder="Search items to add" [ngModel]="productQuery()" (ngModelChange)="productQuery.set($event)" />
+                  </div>
+                  <div class="flex max-h-60 flex-col overflow-y-auto">
+                    @for (p of productMatches(); track p.id) {
+                      <div class="flex items-center gap-3 border-b border-line-soft py-2 last:border-0">
+                        <span class="min-w-0 flex-1">
+                          <span class="block truncate text-[13px] font-medium text-ink">{{ p.name }}</span>
+                          <span class="block text-[11px]" [class]="p.stock <= 0 ? 'text-danger' : 'text-muted'">
+                            {{ formatCurrency(p.sellingPrice) }} · {{ p.stock > 0 ? p.stock + ' left' : 'Out of stock' }}
+                          </span>
+                        </span>
+                        <button type="button" class="btn btn-secondary btn-sm" [disabled]="p.stock <= 0" (click)="addItemToBill(bill.id, p.id)">
+                          Add
+                        </button>
+                      </div>
+                    }
+                  </div>
+
+                  <div class="mt-3 flex justify-between border-t border-line pt-3 text-[13px]">
+                    <span class="text-muted">Bill total</span>
+                    <span class="font-bold text-ink tabular-nums">{{ formatCurrency(bill.total) }}</span>
+                  </div>
+                }
+              </div>
+            }
+          </section>
+
+          <!-- Payment on an existing booking -->
+          @if (activeEditBill(); as bill) {
+            <section class="card overflow-hidden">
+              <button type="button" class="flex w-full items-center gap-3 px-4 py-3.5 text-left" (click)="toggle('pay')">
+                <span class="flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold"
+                  [class]="bill.total - bill.paidAmount <= 0 ? 'bg-success-soft text-success' : 'bg-surface-alt text-muted'">
+                  @if (bill.total - bill.paidAmount <= 0) { <app-icon name="check" [size]="14" /> } @else { {{ stepNo('pay') }} }
+                </span>
+                <span class="min-w-0 flex-1">
+                  <span class="block text-[13px] font-semibold text-ink">Payment</span>
+                  <span class="block truncate text-xs" [class]="bill.total - bill.paidAmount > 0 ? 'text-danger' : 'text-muted'">
+                    {{ bill.total - bill.paidAmount > 0 ? formatCurrency(bill.total - bill.paidAmount) + ' still due' : 'Settled' }}
+                  </span>
+                </span>
+                <app-icon [name]="open() === 'pay' ? 'chevron-down' : 'chevron-right'" [size]="16" />
+              </button>
+
+              @if (open() === 'pay') {
+                <div class="animate-fade-up border-t border-line px-4 py-4">
+                  @if (bill.total - bill.paidAmount > 0) {
+                    <div class="flex flex-col gap-2 sm:flex-row">
+                      <div class="relative flex-1">
+                        <span class="absolute top-1/2 left-3 -translate-y-1/2 text-sm font-semibold text-muted">₹</span>
+                        <input class="input pl-7 font-semibold" type="number" inputmode="numeric" placeholder="Amount" [(ngModel)]="collectAmount" />
+                      </div>
+                      <button type="button" class="btn btn-primary" [disabled]="!collectAmount || collectAmount <= 0" (click)="collect(bill.id, bill.total - bill.paidAmount)">
+                        <app-icon name="wallet" [size]="15" /> Collect
+                      </button>
+                    </div>
+                    <div class="mt-2 flex flex-wrap gap-2">
+                      <button type="button" class="chip" (click)="collectAmount = bill.total - bill.paidAmount">
+                        Full {{ formatCurrency(bill.total - bill.paidAmount) }}
+                      </button>
+                      <button type="button" class="chip" (click)="settle(bill.id)">Settle in full</button>
+                    </div>
+                  } @else {
+                    <p class="flex items-center gap-2 rounded-xl bg-success-soft px-3 py-2.5 text-[13px] font-medium text-success">
+                      <app-icon name="check-circle" [size]="15" /> This bill is fully paid.
+                    </p>
+                  }
+                </div>
+              }
+            </section>
+          }
         }
 
         <!-- Items ------------------------------------------------------ -->
@@ -471,6 +666,36 @@ const DURATIONS = [0.5, 1, 1.5, 2, 3];
         }
       </div>
 
+      @if (pendingRemoval()) {
+        <app-modal [title]="'Remove ' + removalCost().name + '?'" (close)="pendingRemoval.set(null)">
+          <p class="text-[13px] leading-relaxed text-ink-soft">
+            They come off this booking along with their own bill. The others keep theirs. You can undo this straight after,
+            or from Settings → Data.
+          </p>
+          @if (removalCost().total > 0 || removalCost().paid > 0) {
+            <ul class="flex flex-col gap-1.5 rounded-xl bg-canvas px-3.5 py-3 text-[13px] text-ink-soft">
+              <li class="flex items-center gap-2">
+                <app-icon name="receipt" [size]="14" /> Their bill of {{ formatCurrency(removalCost().total) }} goes with them
+              </li>
+              @if (removalCost().items > 0) {
+                <li class="flex items-center gap-2">
+                  <app-icon name="box" [size]="14" /> {{ removalCost().items }} item(s) go back into stock
+                </li>
+              }
+              @if (removalCost().paid > 0) {
+                <li class="flex items-center gap-2 font-semibold text-warn">
+                  <app-icon name="wallet" [size]="14" /> {{ formatCurrency(removalCost().paid) }} already collected comes off the books
+                </li>
+              }
+            </ul>
+          }
+          <div modal-footer>
+            <button type="button" class="btn btn-ghost" (click)="pendingRemoval.set(null)">Keep them</button>
+            <button type="button" class="btn btn-danger" (click)="confirmRemoveCustomer()">Remove</button>
+          </div>
+        </app-modal>
+      }
+
       <!-- Footer ------------------------------------------------------- -->
       <div drawer-footer class="flex w-full items-center gap-3">
         <div class="min-w-0 flex-1">
@@ -539,14 +764,29 @@ export class OrderDrawerComponent {
       this.price.set(editing.finalPrice);
       this.priceOverridden.set(editing.priceOverridden);
       this.splitMode.set(editing.splitMode);
+      this.sessionStart.set(toClock(editing.sessionStartedAt));
+      this.sessionEnd.set(toClock(editing.sessionEndedAt));
       this.open.set('when');
+
+      // Seed the split editor from what each participant is currently charged,
+      // so opening the section shows the real division rather than a guess.
+      const current: Record<string, number> = {};
+      for (const bill of this.store.billsInGroup(editing.id)) {
+        current[bill.customerId] = bill.items.find((i) => i.type === 'booking')?.amount ?? 0;
+      }
+      this.manualShares.set(current);
+      this.payerId.set(
+        Object.entries(current).find(([, amount]) => amount > 0)?.[0] ?? editing.customerIds[0] ?? null,
+      );
     } else {
       if (state.customerId) {
         this.customerIds.set([state.customerId]);
         this.activeCustomer.set(state.customerId);
         this.open.set(state.mode === 'booking' ? 'when' : 'items');
       }
-      this.tableId.set(this.firstFreeTableId());
+      // Started from a specific table (floor view) — keep that choice.
+      this.tableId.set(state.tableId ?? this.firstFreeTableId());
+      if (state.tableId && !state.customerId) this.open.set('customer');
     }
 
     // Keep the auto price in step with table and duration unless overridden.
@@ -562,9 +802,94 @@ export class OrderDrawerComponent {
     if (!this.isEdit()) sections.push('what');
     if (this.mode() === 'booking') sections.push('when');
     if (this.showSplit()) sections.push('split');
-    if (!this.isEdit()) sections.push('items', 'pay');
+    sections.push('items', 'pay');
     return sections;
   });
+
+  // ---------- editing an existing booking ----------
+  /**
+   * When editing, items and payments act on the booking's real bills straight
+   * away, so a round bought at the end never needs a second screen.
+   */
+  editBills = computed(() => {
+    const id = this.flow.state().editBookingId;
+    const booking = id ? this.store.bookingById(id) : undefined;
+    return booking ? this.store.billsInGroup(booking.id) : [];
+  });
+
+  editBillId = signal<string | null>(null);
+
+  activeEditBill = computed(() => {
+    const bills = this.editBills();
+    return bills.find((b) => b.id === this.editBillId()) ?? bills[0];
+  });
+
+  editItemCount = computed(() =>
+    this.editBills().reduce((sum, b) => sum + b.items.filter((i) => i.type === 'product').reduce((n, i) => n + i.qty, 0), 0),
+  );
+
+  collectAmount = 0;
+
+  pendingRemoval = signal<string | null>(null);
+
+  // Session clock, as HH:mm on the booking's own date.
+  sessionStart = signal('');
+  sessionEnd = signal('');
+
+  sessionInvalid = computed(() => {
+    const start = this.sessionStart();
+    const end = this.sessionEnd();
+    return !!start && !!end && timeToMinutes(end) <= timeToMinutes(start);
+  });
+
+  sessionHint = computed(() => {
+    const start = this.sessionStart();
+    if (!start) return 'Not started — the booking still counts as upcoming.';
+    if (!this.sessionEnd()) return 'Running — the table stays busy until this session ends.';
+    return `Played ${formatDuration((timeToMinutes(this.sessionEnd()) - timeToMinutes(start)) / 60)} · frees the table from ${formatTime12(this.sessionEnd())}.`;
+  });
+
+  stampSessionStart(): void {
+    this.sessionStart.set(clockNow());
+  }
+
+  stampSessionEnd(): void {
+    this.sessionEnd.set(clockNow());
+  }
+
+  clearSession(): void {
+    this.sessionStart.set('');
+    this.sessionEnd.set('');
+  }
+
+  customerName(customerId: string): string {
+    return this.store.customers().find((c) => c.id === customerId)?.name ?? 'Customer';
+  }
+
+  stockCeiling(productId: string, currentQty: number): number {
+    return (this.store.productById(productId)?.stock ?? 0) + currentQty;
+  }
+
+  addItemToBill(billId: string, productId: string): void {
+    const product = this.store.productById(productId);
+    if (!product) return;
+    this.store.addProductToBill(billId, product, 1);
+    this.toast.success(`${product.name} added`);
+  }
+
+  collect(billId: string, remaining: number): void {
+    const amount = Math.min(this.collectAmount, remaining);
+    if (amount <= 0) return;
+    this.store.addPayment(billId, amount);
+    this.collectAmount = 0;
+    this.toast.success(`${formatCurrency(amount)} collected`);
+  }
+
+  settle(billId: string): void {
+    this.store.markBillPaid(billId);
+    this.collectAmount = 0;
+    this.toast.success('Bill settled');
+  }
 
   stepNo(section: Section): number {
     return this.visibleSections().indexOf(section) + 1;
@@ -622,18 +947,62 @@ export class OrderDrawerComponent {
 
   addCustomer(id: string): void {
     if (this.customerIds().includes(id)) return;
+
+    // On an existing booking the person joins straight away with their own
+    // bill; the split below decides what they owe.
+    const editId = this.flow.state().editBookingId;
+    if (editId) {
+      this.store.addBookingCustomer(editId, id);
+      this.toast.success(`${this.customerName(id)} added to this booking`);
+    }
+
     this.customerIds.update((ids) => [...ids, id]);
     this.customerQuery.set('');
     if (!this.activeCustomer()) this.activeCustomer.set(id);
     if (!this.payerId()) this.payerId.set(id);
     if (this.splitMode() === 'manual') this.startManual();
     // First pick moves the merchant forward; later picks keep the list open.
-    if (this.customerIds().length === 1) {
+    if (this.customerIds().length === 1 && !editId) {
       this.open.set(this.mode() === 'booking' ? 'when' : 'items');
     }
   }
 
+  /** Taking someone off a live booking removes their money too, so confirm it. */
   removeCustomer(id: string): void {
+    const editId = this.flow.state().editBookingId;
+    if (!editId) {
+      this.dropCustomerLocally(id);
+      return;
+    }
+    if (this.customerIds().length <= 1) {
+      this.toast.error('A booking needs at least one customer');
+      return;
+    }
+    this.pendingRemoval.set(id);
+  }
+
+  confirmRemoveCustomer(): void {
+    const id = this.pendingRemoval();
+    const editId = this.flow.state().editBookingId;
+    this.pendingRemoval.set(null);
+    if (!id || !editId) return;
+
+    const name = this.customerName(id);
+    const batch = this.store.removeBookingCustomer(editId, id);
+    this.dropCustomerLocally(id);
+    if (!batch) return;
+
+    this.toast.show(`${name} removed from this booking`, 'info', {
+      label: 'Undo',
+      run: () => {
+        this.store.restoreDeletion(batch.id);
+        this.customerIds.update((ids) => (ids.includes(id) ? ids : [...ids, id]));
+        this.toast.success(`${name} put back`);
+      },
+    });
+  }
+
+  private dropCustomerLocally(id: string): void {
     this.customerIds.update((ids) => ids.filter((x) => x !== id));
     this.carts.update(({ [id]: _removed, ...rest }) => rest);
     this.payNow.update(({ [id]: _dropped, ...rest }) => rest);
@@ -641,6 +1010,20 @@ export class OrderDrawerComponent {
     if (this.activeCustomer() === id) this.activeCustomer.set(this.customerIds()[0] ?? null);
     if (this.payerId() === id) this.payerId.set(this.customerIds()[0] ?? null);
   }
+
+  /** What removing this person would take with them. */
+  removalCost = computed(() => {
+    const id = this.pendingRemoval();
+    const editId = this.flow.state().editBookingId;
+    if (!id || !editId) return { name: '', total: 0, paid: 0, items: 0 };
+    const bills = this.store.bills().filter((b) => b.bookingId === editId && b.customerId === id);
+    return {
+      name: this.customerName(id),
+      total: bills.reduce((s, b) => s + b.total, 0),
+      paid: bills.reduce((s, b) => s + b.paidAmount, 0),
+      items: bills.reduce((n, b) => n + b.items.filter((i) => i.type === 'product').reduce((q, i) => q + i.qty, 0), 0),
+    };
+  });
 
   createCustomer(): void {
     const c = this.store.addCustomer(this.newName.trim(), this.newMobile.trim());
@@ -663,6 +1046,12 @@ export class OrderDrawerComponent {
   autoPrice = computed(() => Math.round(this.hourlyRate() * this.duration()));
   tableName = computed(() => this.store.tables().find((t) => t.id === this.tableId())?.name ?? 'This table');
 
+  /** Clash windows are the real occupancy, so an early finish reads correctly. */
+  private clashWindow(clash: Booking): string {
+    const { start, end } = this.store.occupancyLabel(clash);
+    return `${formatTime12(start)}–${formatTime12(end)}`;
+  }
+
   tableOptions = computed(() =>
     this.store.tables().map((t) => {
       const clash = this.store.hasConflict(t.id, this.date(), this.startTime(), this.endTime(), this.flow.state().editBookingId ?? undefined);
@@ -671,7 +1060,7 @@ export class OrderDrawerComponent {
         name: t.name,
         hourlyRate: t.hourlyRate,
         busy: !!clash || t.underMaintenance,
-        busyLabel: clash ? `${formatTime12(clash.startTime)}–${formatTime12(clash.endTime)}` : 'maintenance',
+        busyLabel: clash ? this.clashWindow(clash) : 'maintenance',
       };
     }),
   );
@@ -684,12 +1073,12 @@ export class OrderDrawerComponent {
       this.endTime(),
       this.flow.state().editBookingId ?? undefined,
     );
-    return clash ? `${formatTime12(clash.startTime)}–${formatTime12(clash.endTime)}` : '';
+    return clash ? this.clashWindow(clash) : '';
   });
 
   whenSummary = computed(() => {
     if (!this.tableId()) return 'Pick a table';
-    if (this.conflict()) return `${this.tableName()} is busy ${this.conflict()}`;
+    if (this.conflict()) return `${this.tableName()} is in use ${this.conflict()}`;
     return `${this.tableName()} · ${relativeDayLabel(this.date())} · ${formatTime12(this.startTime())}–${formatTime12(this.endTime())} · ${formatCurrency(this.price())}`;
   });
 
@@ -720,7 +1109,7 @@ export class OrderDrawerComponent {
   }
 
   // ---------- split ----------
-  showSplit = computed(() => this.mode() === 'booking' && this.customers().length > 1 && !this.isEdit());
+  showSplit = computed(() => this.mode() === 'booking' && this.customers().length > 1);
 
   shares = computed(() =>
     allocateShares(this.price(), this.customerIds(), this.splitMode(), this.manualShares(), this.payerId() ?? undefined),
@@ -832,6 +1221,7 @@ export class OrderDrawerComponent {
 
   canSave = computed(() => {
     if (this.customerIds().length === 0) return false;
+    if (this.sessionInvalid()) return false;
     if (this.mode() === 'booking') {
       return !!this.tableId() && this.duration() > 0 && !this.conflict() && this.splitValid();
     }
@@ -852,10 +1242,20 @@ export class OrderDrawerComponent {
         priceOverridden: this.priceOverridden(),
       });
       if (this.tableId()) this.store.updateBookingTable(editId, this.tableId());
+      // With several people on the booking the chosen split is authoritative,
+      // so it is written after the price change reallocated proportionally.
+      if (this.customerIds().length > 1) {
+        this.store.applyBookingShares(editId, this.shares());
+      }
+      this.store.updateSessionTimes(
+        editId,
+        this.sessionStart() ? toIso(this.date(), this.sessionStart()) : null,
+        this.sessionEnd() ? toIso(this.date(), this.sessionEnd()) : null,
+      );
       this.toast.success('Booking updated');
       const bill = this.store.bookingById(editId)?.billId;
       this.flow.close();
-      if (bill) this.flow.openDetail(bill);
+      if (bill && !this.onFloorView()) this.flow.openDetail(bill);
       return;
     }
 
@@ -900,8 +1300,17 @@ export class OrderDrawerComponent {
     const firstBill = billByCustomer.get(customerIds[0]) ?? [...billByCustomer.values()][0];
     this.toast.success(this.mode() === 'booking' ? 'Booking saved' : 'Sale saved');
     this.flow.close();
+
+    // Started from the floor view? Stay there — the new booking appears on its
+    // table straight away, so pulling the operator elsewhere would be wrong.
+    if (this.onFloorView()) return;
+
     this.router.navigate(['/operations']).then(() => {
       if (firstBill) this.flow.openDetail(firstBill);
     });
+  }
+
+  private onFloorView(): boolean {
+    return this.router.url.startsWith('/tables');
   }
 }

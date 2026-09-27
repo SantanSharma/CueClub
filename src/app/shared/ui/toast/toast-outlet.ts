@@ -26,6 +26,11 @@ import { ToastService } from './toast.service';
             <app-icon [name]="t.kind === 'success' ? 'check' : t.kind === 'error' ? 'alert' : 'info'" [size]="15" />
           </span>
           <p class="flex-1 text-[13px] leading-snug font-medium text-ink">{{ t.message }}</p>
+          @if (t.action) {
+            <button type="button" class="btn btn-secondary btn-sm shrink-0" (click)="toast.runAction(t)">
+              {{ t.action.label }}
+            </button>
+          }
           <button type="button" class="text-faint transition hover:text-ink" (click)="toast.dismiss(t.id)" aria-label="Dismiss">
             <app-icon name="close" [size]="14" />
           </button>

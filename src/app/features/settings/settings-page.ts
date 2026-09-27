@@ -2,7 +2,7 @@ import { DatePipe } from '@angular/common';
 import { Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
-import { HandoverSession } from '../../core/models/models';
+import { DeletionBatch, HandoverSession } from '../../core/models/models';
 import { DataStoreService } from '../../core/services/data-store.service';
 import { SecurityService } from '../../core/services/security.service';
 import { EmptyStateComponent } from '../../shared/ui/empty-state/empty-state';
@@ -244,7 +244,8 @@ type Tab = 'tables' | 'pricing' | 'shop' | 'access' | 'data';
                   <span>
                     <span class="block text-[14px] font-semibold text-ink">Safety Mode</span>
                     <span class="block text-[13px] text-muted">
-                      Ask for the admin passkey before editing or deleting anything — bookings, bills, customers and stock.
+                      While the shop is handed over, ask for the admin passkey before editing or deleting anything —
+                      bookings, bills, customers and stock. In Admin mode you are never asked.
                       @if (!security.hasPasskey()) { <span class="text-warn">Create a passkey first.</span> }
                     </span>
                   </span>
@@ -256,6 +257,53 @@ type Tab = 'tables' | 'pricing' | 'shop' | 'access' | 'data';
 
         @case ('data') {
           <section class="flex max-w-lg flex-col gap-3">
+            <!-- Recycle bin -->
+            <div class="card card-pad">
+              <div class="flex items-center gap-2">
+                <h3 class="text-[14px] font-bold text-ink">Recently deleted</h3>
+                <span class="text-faint"
+                  [appTooltip]="'Nothing is ever erased. Restoring puts a record back exactly as it was, with its bills, items and payments.'">
+                  <app-icon name="help" [size]="14" />
+                </span>
+              </div>
+              <p class="mt-1 text-[13px] leading-relaxed text-muted">
+                The last 50 deletions. Restoring brings back everything that was removed together.
+              </p>
+
+              @if (store.deletions().length) {
+                <div class="mt-3 flex flex-col">
+                  @for (batch of store.deletions(); track batch.id) {
+                    <div class="flex items-start gap-3 border-b border-line-soft py-3 last:border-0">
+                      <span class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
+                        [class]="batch.restoredAt ? 'bg-success-soft text-success' : 'bg-surface-alt text-muted'">
+                        <app-icon [name]="batch.restoredAt ? 'check' : 'trash'" [size]="15" />
+                      </span>
+                      <div class="min-w-0 flex-1">
+                        <p class="truncate text-[14px] font-semibold text-ink">{{ batch.label }}</p>
+                        <p class="text-xs text-muted">
+                          {{ batch.summary }} · {{ batch.actor }} · {{ batch.at | date: 'MMM d, h:mm a' }}
+                        </p>
+                        @if (!batch.restoredAt && store.restoreClash(batch); as clash) {
+                          <p class="mt-1 flex items-center gap-1.5 text-xs font-medium text-warn">
+                            <app-icon name="alert" [size]="12" /> {{ clash }}
+                          </p>
+                        }
+                      </div>
+                      @if (batch.restoredAt) {
+                        <span class="pill shrink-0 bg-success-soft text-success">Restored</span>
+                      } @else {
+                        <button type="button" class="btn btn-secondary btn-sm shrink-0" (click)="restore(batch)">
+                          Restore
+                        </button>
+                      }
+                    </div>
+                  }
+                </div>
+              } @else {
+                <p class="mt-3 text-[13px] text-muted">Nothing has been deleted yet.</p>
+              }
+            </div>
+
             <div class="card card-pad">
               <h3 class="text-[14px] font-bold text-ink">Start fresh</h3>
               <p class="mt-1 mb-3 text-[13px] leading-relaxed text-muted">
@@ -495,6 +543,12 @@ export class SettingsPage {
   }
 
   // ---------- data ----------
+  async restore(batch: DeletionBatch): Promise<void> {
+    if (!(await this.security.guard('restore this record'))) return;
+    this.store.restoreDeletion(batch.id);
+    this.toast.success(`${batch.label} restored`);
+  }
+
   async resetDemo(): Promise<void> {
     this.confirmReset.set(false);
     if (!(await this.security.requireAdmin('Admin passkey required', 'Restoring the sample data replaces everything in this app.', 'Restore'))) return;
